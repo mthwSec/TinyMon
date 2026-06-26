@@ -1,0 +1,38 @@
+[package]
+name = "tinymon"
+version = "0.1.0"
+edition = "2021"
+authors = ["mthwSec"]
+description = "Tiny always-on-top Windows resource monitor"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mthwSec/TinyMon"
+
+# Size-optimized release profile: aim for a tiny, self-contained .exe.
+[profile.release]
+opt-level = "z"     # optimize aggressively for size
+lto = true          # link-time optimization across all crates
+codegen-units = 1   # maximize optimization (no parallel codegen)
+panic = "abort"     # drop unwinding machinery -> smaller binary
+strip = true        # strip symbols from the final executable
+
+# Optional features.
+#   temp — CPU/GPU temperatures. The metric always offers a native CPU/system
+#          temp via the ACPI thermal-zone PDH counter; this feature adds the
+#          LibreHardwareMonitor WMI reader for accurate, named CPU + GPU sensors.
+#          On by default; opt out (smaller, no COM/WMI) with --no-default-features.
+[features]
+default = ["temp"]
+temp = [
+    "windows/Win32_System_Com",
+    "windows/Win32_System_Ole",
+    "windows/Win32_System_Variant",
+    "windows/Win32_System_Wmi",
+]
+
+[build-dependencies]
+# Build-time only (not in the runtime binary): embeds the app icon + Windows
+# file details (version info) into the .exe via the SDK resource compiler.
+winres = "0.1"
+
+[dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Registry", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_Performance", "Win32_System_Power", "Win32_UI_Controls", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi"] }

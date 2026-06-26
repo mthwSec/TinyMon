@@ -1,0 +1,5 @@
+/target
+
+# Runtime files written next to the exe (never source)
+tinymon.cfg
+tinymon_debug.log
