@@ -310,7 +310,7 @@ pub fn sample_rows(order: &[MetricKey]) -> Vec<Row> {
                 out.push(ram_row(&MemInfo { load_pct: 62.0, used_gib: 9.9, total_gib: 16.0 }))
             }
             MetricKey::Gpu => out.push(crate::gpu::gpu_row("GPU", Some(30.0))),
-            MetricKey::Vram => out.push(crate::gpu::vram_row("VRAM", 4 * GIB, 12 * GIB)),
+            MetricKey::Vram => out.push(crate::gpu::vram_row("VRAM", Some(4 * GIB), 12 * GIB)),
             MetricKey::PerCpu => {
                 for (c, &pct) in [22.0_f64, 8.0, 51.0, 16.0].iter().enumerate() {
                     out.push(crate::percpu::percpu_row(c, pct));

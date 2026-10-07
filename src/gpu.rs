@@ -1,9 +1,10 @@
 //! GPU detection — vendor-neutral.
 //!
 //! Enumerate every non-software adapter via DXGI (discrete or integrated, any
-//! vendor) and report VRAM used/total. GPU load comes from the vendor-neutral
-//! PDH "GPU Engine" performance counters (the same source Task Manager uses),
-//! so it works on Intel/AMD/NVIDIA alike — no vendor SDK.
+//! vendor), tell integrated (UMA) from discrete adapters and take their memory
+//! totals. Load and memory usage come from the vendor-neutral PDH "GPU Engine"
+//! and "GPU Adapter Memory" counters (the sources Task Manager uses), so it
+//! works on Intel/AMD/NVIDIA alike, with no vendor SDK.
 
 use crate::registry::Row;
 
@@ -12,37 +13,30 @@ use crate::pdh::PdhCounter;
 use windows::core::{w, Interface};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter3, IDXGIFactory4, DXGI_ADAPTER_FLAG_SOFTWARE,
-    DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO,
+    DXGI_MEMORY_SEGMENT_GROUP, DXGI_MEMORY_SEGMENT_GROUP_LOCAL,
+    DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO,
 };
 
 /// One detected display adapter.
 pub struct GpuAdapter {
     pub name: String,
+    /// Integrated (UMA): its GPU memory is mostly shared system memory.
+    pub uma: bool,
+    /// Bytes: dedicated memory for a discrete adapter, dedicated + shared for UMA.
     pub vram_total: u64,
-    pub vram_used: u64,
+    /// Adapter-wide bytes in use, by the same rule; `None` while unknown.
+    pub vram_used: Option<u64>,
     /// GPU utilization 0..=100, or `None` if unavailable.
     pub load: Option<f32>,
     /// Lowercased "luid_0x..._0x..." token, used to match this adapter to PDH
-    /// "GPU Engine" counter instances on multi-GPU systems.
+    /// "GPU Engine" and "GPU Adapter Memory" counter instances.
     luid_key: String,
-    /// Held for live VRAM polling each tick.
-    adapter: Option<IDXGIAdapter3>,
 }
 
-impl GpuAdapter {
-    /// Re-query live VRAM usage (cheap; called once per timer tick).
-    pub fn refresh(&mut self) {
-        let Some(a) = &self.adapter else { return };
-        let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
-        // SAFETY: COM call on a live interface; `info` is a stack out-param.
-        if unsafe { a.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info) }.is_ok()
-        {
-            self.vram_used = info.CurrentUsage;
-        }
-    }
-}
-
-/// Enumerate all non-software GPUs with their VRAM usage/total.
+/// Enumerate all non-software GPUs: name, integrated or discrete, and memory
+/// total. Usage is not read here: DXGI's QueryVideoMemoryInfo reports only this
+/// process's own usage (about 0, TinyMon creates no device); `VramGroup` reads
+/// the adapter-wide figures from PDH instead.
 pub fn detect_gpus() -> Vec<GpuAdapter> {
     let mut gpus = Vec::new();
     // SAFETY: DXGI COM calls. Every interface comes from a checked Result before
@@ -61,35 +55,82 @@ pub fn detect_gpus() -> Vec<GpuAdapter> {
                 continue;
             }
 
+            // The two budgets tell UMA from discrete; DXGI computes them without
+            // a D3D device, so this works from a plain process.
             let adapter3 = adapter.cast::<IDXGIAdapter3>().ok();
-            let (mut used, mut budget) = (0u64, 0u64);
-            if let Some(a) = &adapter3 {
-                let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
-                if a.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info).is_ok() {
-                    used = info.CurrentUsage;
-                    budget = info.Budget;
-                }
-            }
-            // Physical dedicated VRAM is the natural "total"; integrated GPUs
-            // often report 0 there, so fall back to the DXGI budget.
-            let total = if desc.DedicatedVideoMemory > 0 {
-                desc.DedicatedVideoMemory as u64
-            } else {
-                budget
-            };
+            let local = adapter3.as_ref().and_then(|a| budget(a, DXGI_MEMORY_SEGMENT_GROUP_LOCAL));
+            let non_local =
+                adapter3.as_ref().and_then(|a| budget(a, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL));
+            let dedicated = desc.DedicatedVideoMemory as u64;
+            let uma = is_uma(local, non_local, dedicated);
             let luid = desc.AdapterLuid;
 
             gpus.push(GpuAdapter {
                 name: short_name(&utf16_to_string(&desc.Description)),
-                vram_total: total,
-                vram_used: used,
+                uma,
+                vram_total: vram_total(uma, dedicated, desc.SharedSystemMemory as u64),
+                vram_used: None,
                 load: None,
                 luid_key: luid_key(luid.HighPart, luid.LowPart),
-                adapter: adapter3,
             });
         }
     }
     gpus
+}
+
+/// One DXGI memory budget of `adapter`: the LOCAL or NON_LOCAL segment group.
+/// `None` when the query fails.
+fn budget(adapter: &IDXGIAdapter3, group: DXGI_MEMORY_SEGMENT_GROUP) -> Option<u64> {
+    let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+    // SAFETY: COM call on a live interface; `info` is a stack out-param.
+    unsafe { adapter.QueryVideoMemoryInfo(0, group, &mut info) }.ok()?;
+    Some(info.Budget)
+}
+
+/// Integrated (UMA) or discrete, from the two DXGI budgets. "For UMA adapters
+/// non-local is always zero" (Microsoft's memory-management guidance), and a
+/// UMA adapter's local budget (shared system memory) exceeds its small
+/// dedicated carve-out. Any other pair of budgets means discrete; without both
+/// budgets only an adapter with no dedicated memory is UMA. A zeroed query
+/// therefore reads as discrete, the safe reading.
+fn is_uma(local: Option<u64>, non_local: Option<u64>, dedicated: u64) -> bool {
+    match (local, non_local) {
+        (Some(l), Some(0)) => l > dedicated || dedicated == 0,
+        (Some(_), Some(_)) => false,
+        _ => dedicated == 0,
+    }
+}
+
+/// Memory total: Task Manager's "GPU memory" (dedicated + shared system memory)
+/// for a UMA adapter, its "Dedicated GPU memory" for a discrete one.
+fn vram_total(uma: bool, dedicated: u64, shared_system: u64) -> u64 {
+    if uma {
+        dedicated.saturating_add(shared_system)
+    } else {
+        dedicated
+    }
+}
+
+/// Memory in use by the same rule: dedicated usage for a discrete adapter,
+/// dedicated + shared usage for a UMA one (`None` only when both are unknown).
+fn vram_used(uma: bool, dedicated: Option<u64>, shared: Option<u64>) -> Option<u64> {
+    if !uma {
+        return dedicated;
+    }
+    match (dedicated, shared) {
+        (None, None) => None,
+        (d, s) => Some(d.unwrap_or(0).saturating_add(s.unwrap_or(0))),
+    }
+}
+
+/// Bytes one adapter uses: the sum of its "luid_..._phys_N" instances of a
+/// "GPU Adapter Memory" counter. `None` (not 0) when no instance matches.
+fn adapter_bytes(samples: &[(String, f64)], luid_key: &str) -> Option<u64> {
+    samples
+        .iter()
+        .filter(|(name, _)| name.starts_with(luid_key))
+        .map(|(_, v)| *v as u64)
+        .reduce(u64::saturating_add)
 }
 
 /// The "luid_0x<high>_0x<low>" token (lowercase hex, HighPart printed as
@@ -240,18 +281,32 @@ impl GpuGroup {
 
 /// VRAM (video memory) source — a separate toggleable metric from GPU load, so
 /// it can be enabled and ordered independently. Reuses the DXGI adapter
-/// detection and polls live usage each tick.
+/// detection; each tick it reads adapter-wide usage from the PDH "GPU Adapter
+/// Memory" counters (instantaneous byte counts, valid on the first collect;
+/// Windows 10 1709 and later).
 pub struct VramGroup {
     gpus: Vec<GpuAdapter>,
+    dedicated: PdhCounter,
+    shared: PdhCounter,
 }
 
 impl VramGroup {
     pub fn new() -> Self {
-        VramGroup { gpus: detect_gpus() }
+        VramGroup {
+            gpus: detect_gpus(),
+            dedicated: PdhCounter::new(w!("\\GPU Adapter Memory(*)\\Dedicated Usage")),
+            shared: PdhCounter::new(w!("\\GPU Adapter Memory(*)\\Shared Usage")),
+        }
     }
+    /// Read both counters once and update every adapter's usage; a missing
+    /// counter, a failed collect or no instance of the adapter's LUID is n/a.
     pub fn refresh(&mut self) {
+        let dedicated = self.dedicated.try_sample().unwrap_or_default();
+        let shared = self.shared.try_sample().unwrap_or_default();
         for g in self.gpus.iter_mut() {
-            g.refresh();
+            let (d, s) =
+                (adapter_bytes(&dedicated, &g.luid_key), adapter_bytes(&shared, &g.luid_key));
+            g.vram_used = vram_used(g.uma, d, s);
         }
     }
     pub fn rows(&self, out: &mut Vec<Row>) {
@@ -270,15 +325,24 @@ fn load_rows(gpus: &[GpuAdapter], out: &mut Vec<Row>) {
     }
 }
 
-/// One "VRAM" row per adapter, qualified by name only when there are several,
-/// or a single "VRAM n/a" row when DXGI found no hardware adapter.
+/// One memory row per adapter, labelled by kind: "GPU Mem" for an integrated
+/// (UMA) adapter, "VRAM" for a discrete one. With several adapters the name
+/// follows the label ("VRAM RTX 3050", "GPU Mem UHD 620"), so a cut label still
+/// says which memory it is; the name part drops a leading "Intel " (the GPU
+/// load row keeps it). A single "VRAM n/a" row when DXGI found no hardware
+/// adapter.
 fn vram_rows(gpus: &[GpuAdapter], out: &mut Vec<Row>) {
     if gpus.is_empty() {
         out.push(Row::na("VRAM"));
     }
     let multi = gpus.len() > 1;
     for g in gpus {
-        let label = if multi { format!("{} VRAM", g.name) } else { "VRAM".to_string() };
+        let kind = if g.uma { "GPU Mem" } else { "VRAM" };
+        let label = if multi {
+            format!("{} {}", kind, g.name.strip_prefix("Intel ").unwrap_or(&g.name))
+        } else {
+            kind.to_string()
+        };
         out.push(vram_row(&label, g.vram_used, g.vram_total));
     }
 }
@@ -292,23 +356,26 @@ pub fn gpu_row(name: &str, load: Option<f32>) -> Row {
     }
 }
 
-/// GPU video-memory row (used/total + a memory-pressure bar that reddens as VRAM
-/// fills). Pure; unit-tested.
-pub fn vram_row(name: &str, used: u64, total: u64) -> Row {
-    let frac = if total > 0 { (used as f32 / total as f32).clamp(0.0, 1.0) } else { 0.0 };
-    Row::bar(name, fmt_vram(used, total), frac)
+/// GPU memory row (used/total + a memory-pressure bar that reddens as it
+/// fills), or a value-only "n/a" row unless the usage is known and the total is
+/// non-zero. Pure; unit-tested.
+pub fn vram_row(name: &str, used: Option<u64>, total: u64) -> Row {
+    match used {
+        Some(u) if total > 0 => {
+            Row::bar(name, fmt_vram(u, total), (u as f32 / total as f32).clamp(0.0, 1.0))
+        }
+        _ => Row::na(name),
+    }
 }
 
-/// Format VRAM used/total with a unit that suits the total (GiB or MiB).
+/// Format used/total with a unit that suits the total (GiB or MiB).
 fn fmt_vram(used: u64, total: u64) -> String {
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: f64 = 1024.0 * 1024.0;
     if total >= GIB {
         format!("{:.1}/{:.0}G", used as f64 / GIB as f64, total as f64 / GIB as f64)
-    } else if total > 0 {
-        format!("{:.0}/{:.0}M", used as f64 / MIB, total as f64 / MIB)
     } else {
-        "n/a".to_string()
+        format!("{:.0}/{:.0}M", used as f64 / MIB, total as f64 / MIB)
     }
 }
 
@@ -316,16 +383,24 @@ fn fmt_vram(used: u64, total: u64) -> String {
 mod tests {
     use super::*;
 
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+
     /// An adapter with the iGPU's LUID (low part 0x109f8) and the given load.
     fn adapter(load: Option<f32>) -> GpuAdapter {
         GpuAdapter {
             name: "GPU".into(),
+            uma: true,
             vram_total: 0,
-            vram_used: 0,
+            vram_used: None,
             load,
             luid_key: luid_key(0, 0x109f8),
-            adapter: None,
         }
+    }
+
+    /// An adapter named `name` with the given kind and memory figures.
+    fn mem(name: &str, uma: bool, used: Option<u64>, total: u64) -> GpuAdapter {
+        GpuAdapter { name: name.into(), uma, vram_total: total, vram_used: used, ..adapter(None) }
     }
 
     /// One "GPU Engine" instance as PdhCounter returns it (lowercased): process
@@ -380,11 +455,81 @@ mod tests {
 
     #[test]
     fn vram_row_formats() {
-        let r = vram_row("VRAM", 2 * 1024 * 1024 * 1024, 16 * 1024 * 1024 * 1024);
+        let r = vram_row("VRAM", Some(2 * GIB), 16 * GIB);
         assert_eq!(r.label, "VRAM");
         assert_eq!(r.value, "2.0/16G");
         assert!((r.bar.unwrap() - 0.125).abs() < 1e-6);
-        assert_eq!(vram_row("VRAM", 0, 128 * 1024 * 1024).value, "0/128M"); // integrated, MiB
+        assert_eq!(vram_row("VRAM", Some(0), 512 * MIB).value, "0/512M"); // MiB below 1 GiB
+    }
+
+    #[test]
+    fn vram_unavailable_is_na() {
+        let r = vram_row("VRAM", None, 16 * GIB);
+        assert_eq!(r.value, "n/a");
+        assert_eq!(r.bar, None);
+    }
+
+    #[test]
+    fn uma_needs_both_budget_signals() {
+        // The UHD 730 as measured: LOCAL budget 7369 MiB, NON_LOCAL 0, 128 MiB carve-out.
+        assert!(is_uma(Some(7369 * MIB), Some(0), 128 * MIB));
+        // A zeroed query reads as discrete, the safe reading.
+        assert!(!is_uma(Some(0), Some(0), 8 * GIB));
+        assert!(!is_uma(Some(7 * GIB), Some(8 * GIB), 8 * GIB));
+        // Without both budgets, only an adapter with no dedicated memory is UMA.
+        assert!(is_uma(None, None, 0));
+        assert!(!is_uma(None, None, 4 * GIB));
+    }
+
+    #[test]
+    fn adapter_bytes_sums_one_adapters_instances() {
+        let s = [
+            ("luid_0x00000000_0x000109f8_phys_0".to_string(), 100.0),
+            ("luid_0x00000000_0x000109f8_phys_1".to_string(), 50.0),
+            ("luid_0x00000000_0x00010d83_phys_0".to_string(), 7.0),
+        ];
+        assert_eq!(adapter_bytes(&s, &luid_key(0, 0x109f8)), Some(150));
+        assert_eq!(adapter_bytes(&s, &luid_key(0, 0x10d83)), Some(7));
+        assert_eq!(adapter_bytes(&s, &luid_key(0, 0x1234)), None);
+    }
+
+    #[test]
+    fn discrete_vram_is_dedicated_memory() {
+        assert_eq!(vram_total(false, 16 * GIB, 16 * GIB), 16 * GIB);
+        assert_eq!(vram_used(false, Some(10 * GIB), Some(300 * MIB)), Some(10 * GIB));
+        assert_eq!(vram_used(false, None, Some(300 * MIB)), None);
+    }
+
+    #[test]
+    fn integrated_vram_is_all_gpu_memory() {
+        let total = vram_total(true, 128 * MIB, 8027 * MIB);
+        assert_eq!(total, 8155 * MIB);
+        let used = vram_used(true, Some(0), Some(793 * MIB));
+        assert_eq!(used, Some(793 * MIB));
+        assert_eq!(vram_row("GPU Mem", used, total).value, "0.8/8G");
+        assert_eq!(vram_used(true, None, Some(5)), Some(5));
+        assert_eq!(vram_used(true, None, None), None);
+    }
+
+    #[test]
+    fn vram_rows_label_by_kind_then_name_when_several() {
+        let rows = |gpus: &[GpuAdapter]| {
+            let mut out = Vec::new();
+            vram_rows(gpus, &mut out);
+            out.into_iter().map(|r| (r.label, r.value)).collect::<Vec<_>>()
+        };
+        let row = |label: &str, value: &str| (label.to_string(), value.to_string());
+        let igpu = mem("Intel UHD 730", true, Some(793 * MIB), 8155 * MIB);
+        assert_eq!(rows(&[igpu]), [row("GPU Mem", "0.8/8G")]);
+        let dgpu = mem("RTX 3050", false, Some(2 * GIB), 16 * GIB);
+        assert_eq!(rows(&[dgpu]), [row("VRAM", "2.0/16G")]);
+        // Label first, so an ellipsis keeps it; the name loses a leading "Intel ".
+        let two =
+            [mem("Intel UHD 620", true, Some(GIB), 8 * GIB), mem("RTX 3050", false, None, 8 * GIB)];
+        assert_eq!(rows(&two), [row("GPU Mem UHD 620", "1.0/8G"), row("VRAM RTX 3050", "n/a")]);
+        // A name that is only "Intel" is kept as it is.
+        let bare = [mem("Intel", true, Some(GIB), 8 * GIB), mem("RTX 3050", false, None, 8 * GIB)];
+        assert_eq!(rows(&bare)[0].0, "GPU Mem Intel");
     }
 
     #[test]
@@ -508,13 +653,15 @@ mod tests {
     #[test]
     #[ignore = "diagnostic: cargo test -- --ignored --nocapture dump_"]
     fn dump_detected_gpus() {
-        for g in detect_gpus() {
+        let mut vram = VramGroup::new();
+        vram.refresh();
+        for g in &vram.gpus {
             println!(
-                "GPU: {:<16} VRAM {} / {} MiB  load={:?}  key={}",
+                "GPU: {:<16} uma={}  VRAM {:?} / {} MiB  key={}",
                 g.name,
-                g.vram_used / (1024 * 1024),
-                g.vram_total / (1024 * 1024),
-                g.load,
+                g.uma,
+                g.vram_used.map(|u| u / MIB),
+                g.vram_total / MIB,
                 g.luid_key
             );
         }

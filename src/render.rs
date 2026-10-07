@@ -399,7 +399,7 @@ mod tests {
         let ram = MemInfo { load_pct: 95.0, used_gib: 15.2, total_gib: 16.0 };
         assert!(is_critical(&ram_row(&ram)));
         assert!(is_critical(&gpu_row("GPU", Some(97.0))));
-        assert!(is_critical(&vram_row("VRAM", 95 * MIB, 100 * MIB)));
+        assert!(is_critical(&vram_row("VRAM", Some(95 * MIB), 100 * MIB)));
         assert!(is_critical(&percpu_row(0, 99.0)));
         #[cfg(feature = "temp")]
         assert!(is_critical(&crate::temp::temp_row("CPU", 92.0)));
