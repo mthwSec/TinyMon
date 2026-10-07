@@ -1,6 +1,7 @@
 //! Shared PDH (Performance Data Helper) plumbing — open an English counter
-//! query and read its per-instance values. Backs the vendor-neutral GPU-load,
-//! per-core CPU, disk, and network samplers (no vendor SDKs, no admin).
+//! query and read its per-instance values. Backs the vendor-neutral GPU load
+//! and GPU memory (VRAM), per-core CPU, disk and thermal-zone samplers (no
+//! vendor SDKs, no admin).
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::System::Performance::{
