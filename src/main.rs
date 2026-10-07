@@ -392,7 +392,7 @@ unsafe extern "system" fn wnd_proc(
 
         // Menu / programmatic commands.
         WM_COMMAND => {
-            handle_command(hwnd, (wparam.0 & 0xFFFF) as usize);
+            handle_command(hwnd, wparam.0 & 0xFFFF);
             LRESULT(0)
         }
 

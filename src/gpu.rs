@@ -290,9 +290,10 @@ mod tests {
         assert_eq!(short_name("AMD"), "AMD");
     }
 
-    /// Diagnostic (no assertions): `cargo test -- --nocapture` to print the
-    /// adapters detected on this machine.
+    /// Diagnostic (no assertions), ignored by default: print the adapters
+    /// detected on this machine with `cargo test -- --ignored --nocapture dump_`.
     #[test]
+    #[ignore = "diagnostic: cargo test -- --ignored --nocapture dump_"]
     fn dump_detected_gpus() {
         for g in detect_gpus() {
             println!(
@@ -306,9 +307,11 @@ mod tests {
         }
     }
 
-    /// Diagnostic: print live PDH "GPU Engine" instances + utilization. Run with
-    /// `cargo test -- --nocapture`. Sleeps ~1s so the rate counter has a delta.
+    /// Diagnostic (no assertions), ignored by default: print live PDH "GPU Engine"
+    /// instances + utilization with `cargo test -- --ignored --nocapture dump_`.
+    /// Sleeps ~1s so the rate counter has a delta.
     #[test]
+    #[ignore = "diagnostic: cargo test -- --ignored --nocapture dump_"]
     fn dump_gpu_load() {
         let s = GpuLoadSampler::new();
         std::thread::sleep(std::time::Duration::from_millis(1100));

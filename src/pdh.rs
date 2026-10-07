@@ -57,7 +57,7 @@ impl PdhCounter {
             if size == 0 {
                 return out;
             }
-            let mut buf = vec![0u64; (size as usize + 7) / 8];
+            let mut buf = vec![0u64; (size as usize).div_ceil(8)];
             let mut bufsize = (buf.len() * 8) as u32;
             let rc = PdhGetFormattedCounterArrayW(
                 self.counter,

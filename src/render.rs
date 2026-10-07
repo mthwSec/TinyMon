@@ -105,6 +105,7 @@ pub fn window_height(scale: Scale, n_rows: i32, font_px: i32) -> i32 {
 /// Render `rows` into a `w`×`h` device-pixel surface using `font`/`scale`/`theme`.
 /// Pure view: no `AppState`, no sampling — the widget and the settings preview
 /// both call this, so they stay pixel-for-pixel consistent.
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn render_rows(
     hdc: HDC,
     w: i32,
@@ -162,6 +163,7 @@ pub unsafe fn render_rows(
 
 /// Draw one row: accent-colored label (left, ellipsized) + value (right) sharing
 /// a uniform value column, then an optional load-colored bar.
+#[allow(clippy::too_many_arguments)]
 unsafe fn draw_row(
     hdc: HDC,
     width: i32,
@@ -183,7 +185,7 @@ unsafe fn draw_row(
     // Threshold alert: a load metric at/above 90% turns its label red (the bar /
     // sparkline already reddens via load color). Battery (bar_color set) is exempt
     // — a high charge is good, not an alert.
-    let critical = row.bar_color.is_none() && row.bar.map_or(false, |f| f >= 0.9);
+    let critical = row.bar_color.is_none() && row.bar.is_some_and(|f| f >= 0.9);
     // The accent palette is tuned for the dark bg; on a light theme darken the
     // label accents so they stay readable (the value text already uses fg).
     let light_bg = (theme.bg >> 8) & 0xFF > 0x80;

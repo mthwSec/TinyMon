@@ -126,6 +126,6 @@ mod tests {
         assert_eq!(buf[top_center] >> 24, 0xFF);
         // the tall green bar is present somewhere
         let green = argb(0xFF, 92, 200, 92);
-        assert!(buf.iter().any(|&p| p == green));
+        assert!(buf.contains(&green));
     }
 }
