@@ -109,11 +109,13 @@ impl GpuLoadSampler {
         GpuLoadSampler { counter: PdhCounter::new(w!("\\GPU Engine(*)\\Utilization Percentage")) }
     }
 
-    /// Assign each adapter a load %: single-GPU systems take the max across all
-    /// engine instances; multi-GPU systems match instances to adapters by LUID.
-    /// A counter that cannot be read leaves every load unknown (n/a), not 0%.
+    /// Assign each adapter its load % (`adapter_load`): Task Manager's busiest
+    /// engine, summed across processes. A counter that cannot be read, or an
+    /// empty sample, leaves every load unknown (n/a), not 0%: a live desktop
+    /// always has engine instances, so empty means PDH_NO_DATA (for example a
+    /// restricted token), not an idle GPU.
     pub fn update(&self, gpus: &mut [GpuAdapter]) {
-        let Some(samples) = self.counter.try_sample() else {
+        let Some(samples) = self.counter.try_sample().filter(|s| !s.is_empty()) else {
             for g in gpus.iter_mut() {
                 g.load = None;
             }
@@ -121,14 +123,7 @@ impl GpuLoadSampler {
         };
         let single = gpus.len() == 1;
         for g in gpus.iter_mut() {
-            let max = samples
-                .iter()
-                .filter(|(name, v)| {
-                    (single || name.contains(&g.luid_key)) && (0.0..=100.5).contains(v)
-                })
-                .map(|(_, v)| *v)
-                .fold(0.0f64, f64::max);
-            g.load = Some(max.clamp(0.0, 100.0) as f32);
+            g.load = Some(adapter_load(&samples, &g.luid_key, single) as f32);
         }
     }
 
@@ -137,6 +132,47 @@ impl GpuLoadSampler {
     pub fn sample_instances(&self) -> Vec<(String, f64)> {
         self.counter.sample()
     }
+}
+
+/// The engine a "GPU Engine" instance belongs to: its name without the leading
+/// "pid_<n>_" and the trailing "_engtype_<type>", e.g.
+/// "pid_10680_luid_0x00000000_0x000109f8_phys_0_eng_0_engtype_3d" ->
+/// "luid_0x00000000_0x000109f8_phys_0_eng_0". Each process using an engine has
+/// its own instance, so instances with the same key are one engine.
+fn engine_key(name: &str) -> &str {
+    let start = name.find("luid_").unwrap_or(0);
+    let end = name.find("_engtype_").unwrap_or(name.len());
+    name.get(start..end).unwrap_or(name)
+}
+
+/// Task Manager's GPU %: the busiest engine, where an engine's load is the sum
+/// over the processes using it. With `luid_key`, only that adapter's instances
+/// count. Values outside 0..=100.5 (counter glitches) are skipped and each
+/// engine is capped at 100. `None` when no instance matched. About 30 engines,
+/// so a small Vec does the grouping (no HashMap).
+fn busiest_engine(samples: &[(String, f64)], luid_key: Option<&str>) -> Option<f64> {
+    let mut engines: Vec<(&str, f64)> = Vec::new();
+    for (name, v) in samples {
+        if !(0.0..=100.5).contains(v) || luid_key.is_some_and(|k| !name.contains(k)) {
+            continue;
+        }
+        let key = engine_key(name);
+        match engines.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, sum)) => *sum += v,
+            None => engines.push((key, *v)),
+        }
+    }
+    engines.iter().map(|(_, sum)| sum.min(100.0)).reduce(f64::max)
+}
+
+/// One adapter's load %: its own engines, matched strictly by LUID, so the Basic
+/// Render Driver's load stays out of a hardware adapter's row. Only a lone
+/// adapter that matched nothing (its LUID changed after a driver update) falls
+/// back to every engine. No match is 0%: an adapter nobody uses has no instances.
+fn adapter_load(samples: &[(String, f64)], luid_key: &str, single: bool) -> f64 {
+    let mine = busiest_engine(samples, Some(luid_key));
+    let load = if single { mine.or_else(|| busiest_engine(samples, None)) } else { mine };
+    load.unwrap_or(0.0)
 }
 
 /// Convert a fixed Win32 UTF-16 buffer (NUL-terminated) to a `String`.
@@ -280,6 +316,25 @@ fn fmt_vram(used: u64, total: u64) -> String {
 mod tests {
     use super::*;
 
+    /// An adapter with the iGPU's LUID (low part 0x109f8) and the given load.
+    fn adapter(load: Option<f32>) -> GpuAdapter {
+        GpuAdapter {
+            name: "GPU".into(),
+            vram_total: 0,
+            vram_used: 0,
+            load,
+            luid_key: luid_key(0, 0x109f8),
+            adapter: None,
+        }
+    }
+
+    /// One "GPU Engine" instance as PdhCounter returns it (lowercased): process
+    /// `pid` on engine `eng` (type `ty`) of the adapter whose LUID low part is
+    /// `luid_low`, reading `v` percent.
+    fn eng(pid: u32, luid_low: u32, eng: u32, ty: &str, v: f64) -> (String, f64) {
+        (format!("pid_{pid}_{}_phys_0_eng_{eng}_engtype_{ty}", luid_key(0, luid_low)), v)
+    }
+
     #[test]
     fn gpu_row_load() {
         let r = gpu_row("RX", Some(55.0));
@@ -306,18 +361,21 @@ mod tests {
 
     #[test]
     fn unreadable_load_counter_shows_na() {
-        let adapter = |load| GpuAdapter {
-            name: "GPU".into(),
-            vram_total: 0,
-            vram_used: 0,
-            load,
-            luid_key: luid_key(0, 0x109f8),
-            adapter: None,
-        };
         let mut gpus = [adapter(Some(40.0)), adapter(Some(60.0))];
         let sampler = GpuLoadSampler { counter: PdhCounter::new(w!("\\No Such Object(*)\\X")) };
         sampler.update(&mut gpus);
         assert!(gpus.iter().all(|g| g.load.is_none()));
+    }
+
+    #[test]
+    fn empty_load_sample_shows_na() {
+        // A single instance that does not exist: the add succeeds and every
+        // collect reports PDH_NO_DATA, the same Some(empty) a restricted token gets.
+        let counter = PdhCounter::new(w!("\\Processor(999)\\% Processor Time"));
+        assert_eq!(counter.try_sample(), Some(Vec::new()));
+        let mut gpus = [adapter(Some(40.0))];
+        GpuLoadSampler { counter }.update(&mut gpus);
+        assert_eq!(gpus[0].load, None);
     }
 
     #[test]
@@ -383,6 +441,68 @@ mod tests {
         assert!(instance.starts_with(&luid_key(0, 0x109f8)));
     }
 
+    #[test]
+    fn engine_key_strips_pid_and_engtype() {
+        assert_eq!(
+            engine_key("pid_10680_luid_0x00000000_0x000109f8_phys_0_eng_0_engtype_3d"),
+            "luid_0x00000000_0x000109f8_phys_0_eng_0"
+        );
+        // An empty engine type, and one with a space.
+        assert_eq!(
+            engine_key("pid_4_luid_0x00000000_0x000109f8_phys_0_eng_11_engtype_"),
+            "luid_0x00000000_0x000109f8_phys_0_eng_11"
+        );
+        assert_eq!(
+            engine_key("pid_968_luid_0x00000000_0x000109f8_phys_0_eng_5_engtype_gdi render"),
+            "luid_0x00000000_0x000109f8_phys_0_eng_5"
+        );
+    }
+
+    #[test]
+    fn load_sums_processes_sharing_an_engine() {
+        // Three processes on eng_0 (60 + 12 + 8) and one on eng_1 (30).
+        let s = [
+            eng(1, 0x109f8, 0, "3d", 60.0),
+            eng(2, 0x109f8, 0, "3d", 12.0),
+            eng(3, 0x109f8, 0, "3d", 8.0),
+            eng(1, 0x109f8, 1, "copy", 30.0),
+        ];
+        assert_eq!(busiest_engine(&s, None), Some(80.0));
+    }
+
+    #[test]
+    fn load_is_clamped_and_skips_garbage() {
+        let busy = [eng(1, 0x109f8, 0, "3d", 70.0), eng(2, 0x109f8, 0, "3d", 40.0)];
+        assert_eq!(busiest_engine(&busy, None), Some(100.0));
+        let glitches = [
+            eng(1, 0x109f8, 0, "3d", 1e9),
+            eng(2, 0x109f8, 0, "3d", -5.0),
+            eng(3, 0x109f8, 0, "3d", 20.0),
+        ];
+        assert_eq!(busiest_engine(&glitches, None), Some(20.0));
+    }
+
+    #[test]
+    fn load_matches_adapter_by_luid() {
+        let s = [eng(1, 0x109f8, 0, "3d", 10.0), eng(2, 0x10d83, 0, "3d", 90.0)];
+        assert_eq!(busiest_engine(&s, Some(&luid_key(0, 0x109f8))), Some(10.0));
+        assert_eq!(busiest_engine(&s, Some(&luid_key(0, 0x10d83))), Some(90.0));
+        assert_eq!(busiest_engine(&s, Some(&luid_key(0, 0x1234))), None);
+        assert_eq!(busiest_engine(&[], None), None);
+    }
+
+    #[test]
+    fn lone_adapter_uses_its_own_engines_then_falls_back() {
+        let igpu = luid_key(0, 0x109f8);
+        // iGPU 3D at 20% while the Basic Render Driver (another LUID) is at 70%.
+        let s = [eng(1, 0x109f8, 0, "3d", 20.0), eng(2, 0x10d83, 0, "3d", 70.0)];
+        assert_eq!(adapter_load(&s, &igpu, true), 20.0);
+        // Only another LUID reports (ours changed): a lone adapter reads it all.
+        let other = [eng(1, 0x10d83, 0, "3d", 35.0)];
+        assert_eq!(adapter_load(&other, &igpu, true), 35.0);
+        assert_eq!(adapter_load(&other, &igpu, false), 0.0);
+    }
+
     /// Diagnostic (no assertions), ignored by default: print the adapters
     /// detected on this machine with `cargo test -- --ignored --nocapture dump_`.
     #[test]
@@ -419,6 +539,9 @@ mod tests {
                 max = *v;
             }
         }
-        println!("overall max GPU utilization = {:.1}%", max);
+        println!("largest single instance = {:.1}%", max);
+        // The widget's figure (GpuLoadSampler::update), here over every adapter.
+        let busiest = busiest_engine(&samples, None).unwrap_or(0.0);
+        println!("busiest engine, summed across processes = {:.1}%", busiest);
     }
 }
