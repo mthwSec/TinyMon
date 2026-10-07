@@ -144,20 +144,33 @@ fn utf16_to_string(buf: &[u16]) -> String {
 
 /// Shorten a verbose adapter description toward a compact label, e.g.
 /// "AMD Radeon RX 9070 XT" -> "RX 9070 XT", "Intel(R) UHD Graphics 770" ->
-/// "Intel UHD 770". Falls back to the trimmed original if cleanup empties it.
+/// "Intel UHD 770", "AMD Radeon(TM) Graphics" -> "Radeon". Falls back to the
+/// trimmed original if cleanup empties it.
 pub fn short_name(desc: &str) -> String {
     let mut s = desc.to_string();
     for junk in ["(R)", "(TM)", "(C)", "®", "™"] {
         s = s.replace(junk, "");
     }
-    // Drop leading vendor/brand words (the spec keeps "Intel", drops the rest).
-    for prefix in ["AMD Radeon ", "AMD ", "Radeon ", "NVIDIA ", "GeForce "] {
-        if let Some(rest) = s.strip_prefix(prefix) {
+    // Normalise whitespace first: "Radeon (TM) Graphics" strips like "Radeon(TM) Graphics".
+    s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Drop the leading company word, then the brand word (the spec keeps "Intel").
+    for company in ["AMD ", "NVIDIA "] {
+        if let Some(rest) = s.strip_prefix(company) {
+            s = rest.to_string();
+        }
+    }
+    let branded = s.clone();
+    for brand in ["Radeon ", "GeForce "] {
+        if let Some(rest) = s.strip_prefix(brand) {
             s = rest.to_string();
         }
     }
     // "Graphics" is noise in names like "Intel UHD Graphics 770".
     s = s.replace(" Graphics ", " ").replace(" Graphics", "");
+    // A Ryzen iGPU ("AMD Radeon(TM) Graphics") names no model: keep the brand.
+    if s == "Graphics" {
+        s = branded.replace(" Graphics", "");
+    }
     let cleaned = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if cleaned.is_empty() {
         desc.trim().to_string()
@@ -294,6 +307,25 @@ mod tests {
     #[test]
     fn bare_vendor_word_kept() {
         assert_eq!(short_name("AMD"), "AMD");
+    }
+
+    #[test]
+    fn ryzen_igpu_keeps_brand() {
+        // Ryzen APUs and Ryzen 7000+ iGPUs name no model after the brand.
+        assert_eq!(short_name("AMD Radeon(TM) Graphics"), "Radeon");
+        assert_eq!(short_name("AMD Radeon Graphics"), "Radeon");
+    }
+
+    #[test]
+    fn apu_model_still_shortened() {
+        assert_eq!(short_name("AMD Radeon(TM) Vega 8 Graphics"), "Vega 8");
+        assert_eq!(short_name("AMD Radeon(TM) 780M Graphics"), "780M");
+    }
+
+    #[test]
+    fn odd_spacing_is_normalised_before_stripping() {
+        assert_eq!(short_name("AMD Radeon (TM) Graphics"), "Radeon");
+        assert_eq!(short_name("NVIDIA  GeForce RTX 4080"), "RTX 4080");
     }
 
     #[test]
