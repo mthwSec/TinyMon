@@ -28,7 +28,10 @@ pub struct Config {
     pub light: Option<bool>,
 }
 
-/// Parse the tiny `key=value` config text (`#` comments and whitespace ok).
+/// Parse the tiny `key=value` config text. Blank lines, whole-line `#` comments
+/// and trailing `# ...` comments are ignored, as is whitespace around keys and
+/// values. No value TinyMon reads can contain `#` (numbers, booleans, metric
+/// tokens, and hotkeys as `format_hotkey` writes them).
 pub fn parse(text: &str) -> Config {
     let mut cfg = Config::default();
     // Tolerate a UTF-8 BOM: editors (e.g. Notepad saving "UTF-8 with BOM")
@@ -40,7 +43,7 @@ pub fn parse(text: &str) -> Config {
             continue;
         }
         if let Some((key, val)) = line.split_once('=') {
-            let val = val.trim();
+            let val = strip_comment(val);
             match key.trim() {
                 "x" => cfg.x = val.parse().ok(),
                 "y" => cfg.y = val.parse().ok(),
@@ -63,6 +66,11 @@ pub fn parse(text: &str) -> Config {
         }
     }
     cfg
+}
+
+/// A value without its trailing comment: the text before the first `#`, trimmed.
+fn strip_comment(val: &str) -> &str {
+    val.split_once('#').map_or(val, |(v, _)| v).trim()
 }
 
 /// Serialize to `key=value` text (omits unset fields).
@@ -242,5 +250,70 @@ mod tests {
         let text = fs::read_to_string(&p).expect("cfg should exist");
         assert_eq!(parse(&text), c);
         let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn parse_strips_inline_comments() {
+        let c = parse(
+            "x=100   # window position\n\
+             metrics=cpu,ram,gpu   # which, in order\n\
+             hotkey_toggle=Ctrl+Alt+M  # optional; e.g. Ctrl+Shift+F1\n\
+             opacity=200#tight\n",
+        );
+        assert_eq!(c.x, Some(100));
+        assert_eq!(c.metrics, Some(vec!["cpu".into(), "ram".into(), "gpu".into()]));
+        assert_eq!(c.hotkey_toggle.as_deref(), Some("Ctrl+Alt+M"));
+        assert_eq!(c.opacity, Some(200));
+    }
+
+    #[test]
+    fn parse_readme_example_block() {
+        // The README's "Keys" block, verbatim (its en dashes written as \u{2013}).
+        let c = parse(
+            "x=100                     # window position (set automatically on move)\n\
+             y=24\n\
+             metrics=cpu,ram,gpu       # which metrics to show, in order\n\
+             opacity=220               # 40\u{2013}255\n\
+             interval_ms=1000          # 250\u{2013}10000\n\
+             font_px=13                # 9\u{2013}16\n\
+             hotkey_toggle=Ctrl+Alt+M  # optional; e.g. Ctrl+Shift+F1\n\
+             hotkey_settings=Ctrl+Alt+S\n",
+        );
+        assert_eq!((c.x, c.y), (Some(100), Some(24)));
+        assert_eq!(c.metrics, Some(vec!["cpu".into(), "ram".into(), "gpu".into()]));
+        assert_eq!((c.opacity, c.interval_ms, c.font_px), (Some(220), Some(1000), Some(13)));
+        assert_eq!(c.hotkey_toggle.as_deref(), Some("Ctrl+Alt+M"));
+        assert_eq!(c.hotkey_settings.as_deref(), Some("Ctrl+Alt+S"));
+    }
+
+    #[test]
+    fn owner_config_still_parses_identically() {
+        // The owner's real 137-byte file; its hotkeys are the bare keys "]" and "[".
+        let text = "x=-213\ny=-16\nmetrics=cpu,ram,gpu,temp,uptime\nopacity=188\n\
+                    interval_ms=1000\nfont_px=13\nhotkey_toggle=0xDD\nhotkey_settings=0xDB\n\
+                    light=false\n";
+        assert_eq!(text.len(), 137);
+        let c = parse(text);
+        assert_eq!(
+            c,
+            Config {
+                x: Some(-213),
+                y: Some(-16),
+                metrics: Some(vec![
+                    "cpu".into(),
+                    "ram".into(),
+                    "gpu".into(),
+                    "temp".into(),
+                    "uptime".into()
+                ]),
+                opacity: Some(188),
+                interval_ms: Some(1000),
+                font_px: Some(13),
+                hotkey_toggle: Some("0xDD".into()),
+                hotkey_settings: Some("0xDB".into()),
+                light: Some(false),
+            }
+        );
+        assert_eq!(serialize(&c), text);
     }
 }

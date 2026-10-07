@@ -38,9 +38,21 @@ impl Settings {
     }
 
     /// Resolve runtime settings from a parsed config, applying defaults + clamps.
+    /// Every `Settings` the app runs with (load, Apply, Reset) passes through here.
     pub fn from_config(c: &Config) -> Settings {
         let order = match &c.metrics {
-            Some(list) => list.iter().filter_map(|s| MetricKey::from_str(s)).collect(),
+            Some(list) => {
+                // Unknown tokens are dropped and only the first occurrence of a
+                // metric counts: a repeat would build a second sampler and push
+                // the last metric out of the settings list.
+                let mut order = Vec::new();
+                for k in list.iter().filter_map(|s| MetricKey::from_str(s)) {
+                    if !order.contains(&k) {
+                        order.push(k);
+                    }
+                }
+                order
+            }
             None => MetricKey::DEFAULT.to_vec(),
         };
         Settings {
@@ -115,6 +127,24 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(Settings::from_config(&c).order, vec![MetricKey::Gpu, MetricKey::Cpu]);
+    }
+
+    #[test]
+    fn metrics_dedup_keeps_first_occurrence() {
+        let c = Config {
+            metrics: Some(vec![
+                "cpu".into(),
+                "ram".into(),
+                "cpu".into(),
+                "gpu".into(),
+                "ram".into(),
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(
+            Settings::from_config(&c).order,
+            vec![MetricKey::Cpu, MetricKey::Ram, MetricKey::Gpu]
+        );
     }
 
     #[test]
