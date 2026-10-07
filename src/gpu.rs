@@ -111,11 +111,14 @@ impl GpuLoadSampler {
 
     /// Assign each adapter a load %: single-GPU systems take the max across all
     /// engine instances; multi-GPU systems match instances to adapters by LUID.
+    /// A counter that cannot be read leaves every load unknown (n/a), not 0%.
     pub fn update(&self, gpus: &mut [GpuAdapter]) {
-        if !self.counter.ok() {
+        let Some(samples) = self.counter.try_sample() else {
+            for g in gpus.iter_mut() {
+                g.load = None;
+            }
             return;
-        }
-        let samples = self.counter.sample();
+        };
         let single = gpus.len() == 1;
         for g in gpus.iter_mut() {
             let max = samples
@@ -195,9 +198,7 @@ impl GpuGroup {
     }
     /// Append one utilization row per adapter.
     pub fn rows(&self, out: &mut Vec<Row>) {
-        for g in &self.gpus {
-            out.push(gpu_row(&g.name, g.load));
-        }
+        load_rows(&self.gpus, out);
     }
 }
 
@@ -218,22 +219,41 @@ impl VramGroup {
         }
     }
     pub fn rows(&self, out: &mut Vec<Row>) {
-        // One "VRAM" row per adapter; qualify by name only when there are several.
-        let multi = self.gpus.len() > 1;
-        for g in &self.gpus {
-            let label = if multi { format!("{} VRAM", g.name) } else { "VRAM".to_string() };
-            out.push(vram_row(&label, g.vram_used, g.vram_total));
-        }
+        vram_rows(&self.gpus, out);
     }
 }
 
-/// GPU utilization row (name + load %). Pure; unit-tested.
+/// One load row per adapter, or a single "GPU n/a" row when DXGI found no
+/// hardware adapter (RDP, or a VM with only the Basic Render Driver).
+fn load_rows(gpus: &[GpuAdapter], out: &mut Vec<Row>) {
+    if gpus.is_empty() {
+        out.push(Row::na("GPU"));
+    }
+    for g in gpus {
+        out.push(gpu_row(&g.name, g.load));
+    }
+}
+
+/// One "VRAM" row per adapter, qualified by name only when there are several,
+/// or a single "VRAM n/a" row when DXGI found no hardware adapter.
+fn vram_rows(gpus: &[GpuAdapter], out: &mut Vec<Row>) {
+    if gpus.is_empty() {
+        out.push(Row::na("VRAM"));
+    }
+    let multi = gpus.len() > 1;
+    for g in gpus {
+        let label = if multi { format!("{} VRAM", g.name) } else { "VRAM".to_string() };
+        out.push(vram_row(&label, g.vram_used, g.vram_total));
+    }
+}
+
+/// GPU utilization row (name + load %), or a value-only "n/a" row when the load
+/// is unknown. Pure; unit-tested.
 pub fn gpu_row(name: &str, load: Option<f32>) -> Row {
-    let value = match load {
-        Some(l) => format!("{:.0}%", l),
-        None => "n/a".to_string(),
-    };
-    Row::bar(name, value, load.map(|l| l / 100.0).unwrap_or(0.0))
+    match load {
+        Some(l) => Row::bar(name, format!("{:.0}%", l), l / 100.0),
+        None => Row::na(name),
+    }
 }
 
 /// GPU video-memory row (used/total + a memory-pressure bar that reddens as VRAM
@@ -272,7 +292,32 @@ mod tests {
     fn gpu_row_no_load() {
         let r = gpu_row("Intel", None);
         assert_eq!(r.value, "n/a");
-        assert_eq!(r.bar, Some(0.0));
+        assert_eq!(r.bar, None);
+    }
+
+    #[test]
+    fn no_hardware_adapter_shows_na_rows() {
+        let mut out = Vec::new();
+        load_rows(&[], &mut out);
+        vram_rows(&[], &mut out);
+        let got: Vec<_> = out.iter().map(|r| (r.label.as_str(), r.value.as_str(), r.bar)).collect();
+        assert_eq!(got, [("GPU", "n/a", None), ("VRAM", "n/a", None)]);
+    }
+
+    #[test]
+    fn unreadable_load_counter_shows_na() {
+        let adapter = |load| GpuAdapter {
+            name: "GPU".into(),
+            vram_total: 0,
+            vram_used: 0,
+            load,
+            luid_key: luid_key(0, 0x109f8),
+            adapter: None,
+        };
+        let mut gpus = [adapter(Some(40.0)), adapter(Some(60.0))];
+        let sampler = GpuLoadSampler { counter: PdhCounter::new(w!("\\No Such Object(*)\\X")) };
+        sampler.update(&mut gpus);
+        assert!(gpus.iter().all(|g| g.load.is_none()));
     }
 
     #[test]

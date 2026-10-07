@@ -35,10 +35,6 @@ impl PdhCounter {
         Self { query, counter, ok }
     }
 
-    pub fn ok(&self) -> bool {
-        self.ok
-    }
-
     /// Collect a fresh sample: (lowercased instance name, value) for each valid
     /// instance. `None` when the reading failed: the counter was never added, or
     /// collecting or formatting failed. `Some(empty)` means no instance was
@@ -102,7 +98,9 @@ impl PdhCounter {
         Some(out)
     }
 
-    /// `try_sample()` with a failed reading turned into an empty sample.
+    /// `try_sample()` with a failed reading turned into an empty sample. Only the
+    /// temperature reader (feature `temp`) and tests still use it.
+    #[cfg(any(test, feature = "temp"))]
     pub fn sample(&self) -> Vec<(String, f64)> {
         self.try_sample().unwrap_or_default()
     }
