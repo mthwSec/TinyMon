@@ -41,7 +41,7 @@ impl DiskSampler {
 
 pub fn disk_row(label: &str, bytes_per_sec: f64) -> Row {
     let frac = (bytes_per_sec / DISK_CEIL).clamp(0.0, 1.0) as f32;
-    Row::bar(label, fmt_rate(bytes_per_sec), frac)
+    Row::rate(label, fmt_rate(bytes_per_sec), frac)
 }
 
 #[cfg(test)]

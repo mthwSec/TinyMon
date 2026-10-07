@@ -79,6 +79,7 @@ impl TempSource {
                 bar: None,
                 color: None,
                 bar_color: None,
+                alert: false,
             });
         }
     }

@@ -68,12 +68,27 @@ pub fn battery_value(info: &BatteryInfo) -> String {
 pub fn battery_row(info: &BatteryInfo) -> Row {
     let value = battery_value(info);
     if !info.present {
-        return Row { label: "Bat".into(), value, bar: None, color: None, bar_color: None };
+        return Row {
+            label: "Bat".into(),
+            value,
+            bar: None,
+            color: None,
+            bar_color: None,
+            alert: false,
+        };
     }
     let frac = (info.percent as f32 / 100.0).clamp(0.0, 1.0);
     // Color by charge remaining: 100% -> green, 0% -> red (load_color inverted).
+    // A high charge is good news, so the row never raises the red label alert.
     let charge_color = crate::metrics::load_color(1.0 - frac);
-    Row { label: "Bat".into(), value, bar: Some(frac), color: None, bar_color: Some(charge_color) }
+    Row {
+        label: "Bat".into(),
+        value,
+        bar: Some(frac),
+        color: None,
+        bar_color: Some(charge_color),
+        alert: false,
+    }
 }
 
 #[cfg(test)]

@@ -51,7 +51,8 @@
 //!     pub fn sample(&mut self) { /* drain present events; compute frames/sec */ }
 //!     pub fn rows(&self, out: &mut Vec<crate::registry::Row>) {
 //!         // bar scaled to a sensible ceiling (e.g. 144 Hz); honest label.
-//!         out.push(crate::registry::Row::bar("FPS", format!("{:.0}", self.fps),
+//!         // Row::rate, not Row::bar: a high frame rate must not turn the label red.
+//!         out.push(crate::registry::Row::rate("FPS", format!("{:.0}", self.fps),
 //!                                             (self.fps / 144.0).min(1.0)));
 //!     }
 //! }

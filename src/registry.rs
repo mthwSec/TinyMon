@@ -19,16 +19,21 @@ use crate::settings::Settings;
 /// `color` is the label's accent color (`None` -> default foreground).
 /// `bar_color` overrides the bar fill color (`None` -> the default load color,
 /// green→yellow→red by load); used e.g. by battery to color by remaining charge.
+/// `alert` lets the label turn red at high load (`render::is_critical`): true
+/// for load rows (`Row::bar`), false for throughput rows (`Row::rate`), battery
+/// and value-only rows.
 pub struct Row {
     pub label: String,
     pub value: String,
     pub bar: Option<f32>,
     pub color: Option<(u8, u8, u8)>,
     pub bar_color: Option<(u8, u8, u8)>,
+    pub alert: bool,
 }
 
 impl Row {
-    /// A standard row with a load-colored bar.
+    /// A load row (CPU, RAM, GPU, VRAM, per-core, temperature) with a
+    /// load-colored bar; its label turns red at high load.
     pub fn bar(label: impl Into<String>, value: impl Into<String>, frac: f32) -> Row {
         Row {
             label: label.into(),
@@ -36,7 +41,14 @@ impl Row {
             bar: Some(frac),
             color: None,
             bar_color: None,
+            alert: true,
         }
+    }
+
+    /// A throughput row (disk, net): the same load-colored bar, but `frac` is a
+    /// rate against a soft ceiling, so the label never raises the red alert.
+    pub fn rate(label: impl Into<String>, value: impl Into<String>, frac: f32) -> Row {
+        Row { alert: false, ..Row::bar(label, value, frac) }
     }
 }
 
@@ -343,7 +355,7 @@ pub fn uptime_row(ms: u64) -> Row {
     } else {
         format!("{:02}:{:02}:{:02}", h, m, s)
     };
-    Row { label: "Up".into(), value, bar: None, color: None, bar_color: None }
+    Row { label: "Up".into(), value, bar: None, color: None, bar_color: None, alert: false }
 }
 
 /// Human-readable byte rate, e.g. "5.0M/s", "12K/s", "300B/s".

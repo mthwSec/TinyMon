@@ -161,6 +161,16 @@ pub unsafe fn render_rows(
     SelectObject(hdc, old_font); // restore so our font isn't selected at teardown
 }
 
+/// Load fraction at which a load row's label turns red.
+const ALERT_AT: f32 = 0.9;
+
+/// Whether `row`'s label is painted red: only rows that opt into the alert
+/// (load rows, built with `Row::bar`) at or above `ALERT_AT`. Throughput rows
+/// (`Row::rate`), battery and value-only rows never alert.
+pub fn is_critical(row: &Row) -> bool {
+    row.alert && row.bar.is_some_and(|f| f >= ALERT_AT)
+}
+
 /// Draw one row: accent-colored label (left, ellipsized) + value (right) sharing
 /// a uniform value column, then an optional load-colored bar.
 #[allow(clippy::too_many_arguments)]
@@ -182,10 +192,9 @@ unsafe fn draw_row(
     let mut label_rc = RECT { left: pad, top: y, right: label_right, bottom: y + label_h };
     let mut value_rc = RECT { left: value_left, top: y, right: content_right, bottom: y + label_h };
 
-    // Threshold alert: a load metric at/above 90% turns its label red (the bar /
-    // sparkline already reddens via load color). Battery (bar_color set) is exempt
-    // — a high charge is good, not an alert.
-    let critical = row.bar_color.is_none() && row.bar.is_some_and(|f| f >= 0.9);
+    // Threshold alert: a load row at or above ALERT_AT turns its label red (the
+    // bar / sparkline already reddens via load color); see `is_critical`.
+    let critical = is_critical(row);
     // The accent palette is tuned for the dark bg; on a light theme darken the
     // label accents so they stay readable (the value text already uses fg).
     let light_bg = (theme.bg >> 8) & 0xFF > 0x80;
@@ -319,8 +328,15 @@ fn wide(s: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{emphasize, header_h, label_h, row_block, win_w, window_height};
+    use super::{emphasize, header_h, is_critical, label_h, row_block, win_w, window_height};
+    use crate::battery::{battery_row, BatteryInfo};
+    use crate::disk::disk_row;
     use crate::dpi::Scale;
+    use crate::gpu::{gpu_row, vram_row};
+    use crate::metrics::MemInfo;
+    use crate::net::net_row;
+    use crate::percpu::percpu_row;
+    use crate::registry::{cpu_row, ram_row, uptime_row};
 
     #[test]
     fn geometry_identity_at_96() {
@@ -367,5 +383,39 @@ mod tests {
         assert_eq!(emphasize(200, true), 140);
         assert_eq!(emphasize(255, true), 178);
         assert_eq!(emphasize(0, true), 0);
+    }
+
+    #[test]
+    fn throughput_rows_never_alert() {
+        // Both bars are full (1.0) with no bar_color: the old predicate said true.
+        assert!(!is_critical(&disk_row("Disk R", 500.0 * 1024.0 * 1024.0)));
+        assert!(!is_critical(&net_row("Net\u{2193}", 50e6)));
+    }
+
+    #[test]
+    fn load_rows_alert_from_ninety_percent() {
+        const MIB: u64 = 1024 * 1024;
+        assert!(is_critical(&cpu_row(90.0)));
+        let ram = MemInfo { load_pct: 95.0, used_gib: 15.2, total_gib: 16.0 };
+        assert!(is_critical(&ram_row(&ram)));
+        assert!(is_critical(&gpu_row("GPU", Some(97.0))));
+        assert!(is_critical(&vram_row("VRAM", 95 * MIB, 100 * MIB)));
+        assert!(is_critical(&percpu_row(0, 99.0)));
+        #[cfg(feature = "temp")]
+        assert!(is_critical(&crate::temp::temp_row("CPU", 92.0)));
+        assert!(!is_critical(&cpu_row(89.0)));
+    }
+
+    #[test]
+    fn battery_and_value_rows_never_alert() {
+        let full = BatteryInfo {
+            present: true,
+            ac_online: true,
+            charging: false,
+            percent: 100,
+            secs_left: None,
+        };
+        assert!(!is_critical(&battery_row(&full)));
+        assert!(!is_critical(&uptime_row(3_600_000)));
     }
 }
