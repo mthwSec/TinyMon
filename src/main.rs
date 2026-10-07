@@ -190,9 +190,10 @@ fn main() -> Result<()> {
 
         // Resolve settings from the saved config, then build the enabled metric
         // sources (disabled metrics are never constructed -> use no resources).
-        let cfg = config::load();
-        let settings = Settings::from_config(&cfg);
+        // The write path is resolved first: loading starts from that file.
         let cfg_path = config::resolve_write_path();
+        let cfg = config::load(cfg_path.as_deref());
+        let settings = Settings::from_config(&cfg);
         let dpi = dpi::system_dpi();
         let scale = Scale(dpi);
         let font = create_mono_font(scale, settings.font_px);

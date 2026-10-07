@@ -4,10 +4,18 @@
 //! that folder isn't writable, fall back to `%APPDATA%\TinyMon\tinymon.cfg`.
 //! Writability is decided by an actual test write, never guessed — so the same
 //! .exe runs from a read-only USB stick, Program Files, or a normal folder.
+//!
+//! Loading starts from the file this install saves to (see `load`), and the
+//! file's bytes are decoded leniently (`decode`): a UTF-16 or ANSI file reads
+//! as what it says instead of as "no config".
 
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+/// The config file's name, next to the .exe or in `%APPDATA%\TinyMon`.
+const CFG_NAME: &str = "tinymon.cfg";
 
 /// Persisted settings (the on-disk DTO). Unknown keys are ignored on read, so
 /// configs stay forward/backward compatible across versions.
@@ -106,23 +114,22 @@ pub fn serialize(cfg: &Config) -> String {
     s
 }
 
-/// Load config, reading whichever existing file was written **most recently**.
-/// This guarantees read-after-write across restarts no matter which location the
-/// last save landed in (the .exe folder when writable, else `%APPDATA%`) — a
-/// stale `tinymon.cfg` next to the .exe can never shadow a newer `%APPDATA%` one,
-/// and the choice doesn't depend on a flaky writability probe at read time.
-pub fn load() -> Config {
-    let newest = read_candidates()
+/// Load the config, starting from the file this install saves to: `write_path`
+/// is what `resolve_write_path` returned. A portable install (one that saves
+/// next to its .exe) reads its own file first even when `%APPDATA%` holds a
+/// newer one, which then only seeds a first run, because another install may
+/// have written it. Otherwise the newer file wins, so a save made while the .exe
+/// folder was still writable is not shadowed by an older `%APPDATA%` file. A
+/// missing or unreadable file falls through to the next; with none, defaults.
+pub fn load(write_path: Option<&Path>) -> Config {
+    let found = read_candidates()
         .into_iter()
-        .filter_map(|p| Some((fs::metadata(&p).ok()?.modified().ok()?, p)))
-        .max_by_key(|(mtime, _)| *mtime)
-        .map(|(_, p)| p);
-    if let Some(path) = newest {
-        if let Ok(text) = fs::read_to_string(&path) {
-            return parse(&text);
-        }
-    }
-    Config::default()
+        .filter_map(|p| {
+            let modified = fs::metadata(&p).ok()?.modified().ok()?;
+            Some((p, modified))
+        })
+        .collect();
+    load_first(&load_order(is_portable(write_path, exe_dir().as_deref()), found))
 }
 
 /// Resolve where to *write* the config: the .exe folder if writable (decided by
@@ -131,13 +138,13 @@ pub fn load() -> Config {
 pub fn resolve_write_path() -> Option<PathBuf> {
     if let Some(dir) = exe_dir() {
         if dir_is_writable(&dir) {
-            return Some(dir.join("tinymon.cfg"));
+            return Some(dir.join(CFG_NAME));
         }
     }
     if let Some(dir) = appdata_dir() {
         let _ = fs::create_dir_all(&dir);
         if dir_is_writable(&dir) {
-            return Some(dir.join("tinymon.cfg"));
+            return Some(dir.join(CFG_NAME));
         }
     }
     None
@@ -150,15 +157,68 @@ pub fn write(path: &Path, cfg: &Config) {
 
 // ---- internals -------------------------------------------------------------
 
+/// The config files to look for, in this order: the .exe folder's, then the
+/// `%APPDATA%` one.
 fn read_candidates() -> Vec<PathBuf> {
     let mut v = Vec::new();
     if let Some(dir) = exe_dir() {
-        v.push(dir.join("tinymon.cfg"));
+        v.push(dir.join(CFG_NAME));
     }
     if let Some(dir) = appdata_dir() {
-        v.push(dir.join("tinymon.cfg"));
+        v.push(dir.join(CFG_NAME));
     }
     v
+}
+
+/// Whether `write_path` is the config file next to the .exe (a portable
+/// install). Compared as OS strings; both sides come from `exe_dir`.
+fn is_portable(write_path: Option<&Path>, exe_dir: Option<&Path>) -> bool {
+    match (write_path, exe_dir) {
+        (Some(w), Some(d)) => w.as_os_str() == d.join(CFG_NAME).as_os_str(),
+        _ => false,
+    }
+}
+
+/// The order to try the existing files in. `found` holds them with their
+/// modification times in `read_candidates` order. A portable install keeps that
+/// order (its own file first); otherwise the newer file goes first. There are
+/// at most two, so one compare-and-swap does instead of a sort.
+fn load_order(portable: bool, mut found: Vec<(PathBuf, SystemTime)>) -> Vec<PathBuf> {
+    if !portable && found.len() == 2 && found[1].1 > found[0].1 {
+        found.swap(0, 1);
+    }
+    found.into_iter().map(|(p, _)| p).collect()
+}
+
+/// Parse the first of `paths` that can actually be read; defaults if none can.
+fn load_first(paths: &[PathBuf]) -> Config {
+    for p in paths {
+        if let Ok(bytes) = fs::read(p) {
+            return parse(&decode(&bytes));
+        }
+    }
+    Config::default()
+}
+
+/// The text of a config file; never fails. A file that starts with a UTF-16
+/// byte order mark (PowerShell 5.1 `Out-File` or `>`, Notepad "UTF-16") is
+/// decoded as UTF-16. Anything else is read as ASCII: a leading UTF-8 BOM is
+/// dropped and every other non-ASCII byte becomes a space. Keys and values are
+/// ASCII, so UTF-8 and ANSI files read alike, and a value padded with a
+/// no-break space still trims to the same token.
+fn decode(bytes: &[u8]) -> String {
+    fn utf16(b: &[u8], unit: fn([u8; 2]) -> u16) -> String {
+        let units: Vec<u16> = b.chunks_exact(2).map(|c| unit([c[0], c[1]])).collect();
+        String::from_utf16_lossy(&units)
+    }
+    match bytes {
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes),
+        _ => {
+            let text = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+            text.iter().map(|&c| if c.is_ascii() { c as char } else { ' ' }).collect()
+        }
+    }
 }
 
 fn exe_dir() -> Option<PathBuf> {
@@ -182,6 +242,15 @@ fn dir_is_writable(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    /// A fresh, empty folder under %TEMP% for one test's files.
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("tinymon_test_{name}"));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).expect("create scratch folder");
+        d
+    }
 
     #[test]
     fn parse_basic() {
@@ -315,5 +384,85 @@ mod tests {
             }
         );
         assert_eq!(serialize(&c), text);
+    }
+
+    #[test]
+    fn decode_utf16le_bom() {
+        // PowerShell 5.1 `Out-File` and `>` write UTF-16LE with a BOM.
+        let mut bytes = vec![0xFF, 0xFE];
+        for u in "opacity=200\r\nx=5\r\n".encode_utf16() {
+            bytes.extend_from_slice(&u.to_le_bytes());
+        }
+        let c = parse(&decode(&bytes));
+        assert_eq!((c.opacity, c.x), (Some(200), Some(5)));
+    }
+
+    #[test]
+    fn decode_utf16be_bom() {
+        let mut bytes = vec![0xFE, 0xFF];
+        for u in "opacity=201".encode_utf16() {
+            bytes.extend_from_slice(&u.to_be_bytes());
+        }
+        assert_eq!(parse(&decode(&bytes)).opacity, Some(201));
+    }
+
+    #[test]
+    fn decode_utf8_with_bom_still_parses() {
+        assert_eq!(parse(&decode(b"\xEF\xBB\xBFopacity=199")).opacity, Some(199));
+    }
+
+    #[test]
+    fn decode_invalid_utf8_is_lossy_not_fatal() {
+        // An ANSI comment line: invalid UTF-8, which made the whole file unreadable.
+        let c = parse(&decode(b"metrics=cpu\n# caf\xE9 \xE1\xE2\nopacity=150\n"));
+        assert_eq!(c.metrics, Some(vec!["cpu".into()]));
+        assert_eq!(c.opacity, Some(150));
+    }
+
+    #[test]
+    fn decode_keeps_unicode_whitespace_tolerance() {
+        // UTF-8 no-break spaces (C2 A0) next to values still trim away.
+        let c = parse(&decode(b"metrics=cpu,\xC2\xA0ram\nx=1\xC2\xA0\ny=2\n"));
+        assert_eq!(c.metrics, Some(vec!["cpu".into(), "ram".into()]));
+        assert_eq!((c.x, c.y), (Some(1), Some(2)));
+    }
+
+    #[test]
+    fn is_portable_matches_only_the_exe_folder_file() {
+        let d = Path::new(r"D:\TinyMon");
+        let appdata = Path::new(r"C:\Users\me\AppData\Roaming\TinyMon");
+        assert!(is_portable(Some(&d.join("tinymon.cfg")), Some(d)));
+        assert!(!is_portable(Some(&appdata.join("tinymon.cfg")), Some(d)));
+        assert!(!is_portable(None, Some(d)));
+    }
+
+    #[test]
+    fn load_order_portable_prefers_own_file_even_if_older() {
+        let (exe, app) = (PathBuf::from("exe.cfg"), PathBuf::from("appdata.cfg"));
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let day = Duration::from_secs(86_400);
+        let found = vec![(exe.clone(), t0), (app.clone(), t0 + day)];
+        assert_eq!(load_order(true, found), vec![exe, app]);
+    }
+
+    #[test]
+    fn load_order_appdata_mode_prefers_newer() {
+        let (exe, app) = (PathBuf::from("exe.cfg"), PathBuf::from("appdata.cfg"));
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let day = Duration::from_secs(86_400);
+        let exe_newer = vec![(exe.clone(), t0 + day), (app.clone(), t0)];
+        assert_eq!(load_order(false, exe_newer), vec![exe.clone(), app.clone()]);
+        let app_newer = vec![(exe.clone(), t0), (app.clone(), t0 + day)];
+        assert_eq!(load_order(false, app_newer), vec![app, exe]);
+    }
+
+    #[test]
+    fn load_first_skips_missing_and_uses_next() {
+        let d = scratch("load_first");
+        let missing = d.join("missing.cfg");
+        let other = d.join("other.cfg");
+        fs::write(&other, "opacity=77\n").expect("write other.cfg");
+        assert_eq!(load_first(&[missing.clone(), other]).opacity, Some(77));
+        assert_eq!(load_first(&[missing]), Config::default());
     }
 }
