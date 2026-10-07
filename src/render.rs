@@ -34,12 +34,20 @@ pub const FG_COLOR: u32 = 0x00E0_E0E0;
 pub const TRACK_COLOR: u32 = 0x0040_4040;
 /// Dim gray for the header title.
 pub const HEADER_FG: u32 = 0x0080_8080;
-/// 1px lighter top edge on the bar track (a subtle inset bevel).
+/// 1px top edge on the dark bar track (a subtle inset bevel), a step lighter
+/// than the track; `LIGHT` uses a darker edge instead, as `emphasize` does.
 const TRACK_EDGE: u32 = 0x0050_5050;
 
-/// Move a channel ~30% toward white (the highlight band on bar fills).
-fn lighten(c: u8) -> u8 {
-    (c as u32 + (255 - c as u32) * 3 / 10) as u8
+/// Emphasize a fill's highlight / top-line: on the dark theme move the channel
+/// ~30% toward white (a lit top edge); on the light theme move it ~30% toward
+/// black instead, so the accent stays crisp on the pale background rather than
+/// washing out into it.
+fn emphasize(c: u8, light_bg: bool) -> u8 {
+    if light_bg {
+        (c as u32 * 7 / 10) as u8
+    } else {
+        (c as u32 + (255 - c as u32) * 3 / 10) as u8
+    }
 }
 
 /// Color scheme handed to [`render_rows`]. Fixed today, but threading it keeps
@@ -65,9 +73,9 @@ pub const THEME: RenderTheme = RenderTheme {
 pub const LIGHT: RenderTheme = RenderTheme {
     bg: 0x00F3_F3F3,
     fg: 0x0020_2020,
-    track: 0x00D6_D6D6,
+    track: 0x00C8_C8C8,
     header_fg: 0x0070_7070,
-    track_edge: 0x00C4_C4C4,
+    track_edge: 0x00B4_B4B4,
 };
 
 /// Height of one label line at `scale`/`font_px` (glyph box + a little leading).
@@ -204,34 +212,44 @@ unsafe fn draw_row(
         let bar_top = y + label_h + scale.px(BAR_GAP);
         let track = RECT { left: pad, top: bar_top, right: content_right, bottom: bar_top + bar_h };
         paint_rect(hdc, &track, COLORREF(theme.track));
-        // 1px lighter top edge — a subtle inset bevel.
+        // 1px top edge, a subtle inset bevel: lighter than the track on the dark
+        // theme, darker on the light one (the same direction as `emphasize`).
         paint_rect(hdc, &RECT { bottom: track.top + 1, ..track }, COLORREF(theme.track_edge));
 
         let f = frac.clamp(0.0, 1.0);
         // Load metrics with accumulated history render as a per-sample sparkline;
         // rows with a fixed bar color (e.g. battery) keep a solid level bar.
         if !hist.is_empty() && row.bar_color.is_none() {
-            draw_sparkline(hdc, &track, hist);
+            draw_sparkline(hdc, &track, hist, light_bg);
         } else {
             let fill_w = ((track.right - track.left) as f32 * f).round() as i32;
             if fill_w > 0 {
                 let filled = RECT { right: track.left + fill_w, ..track };
                 let (r, g, b) = row.bar_color.unwrap_or_else(|| load_color(f));
                 paint_rect(hdc, &filled, colorref(r, g, b));
-                // Soft highlight on the top ~45% for a gentle gradient.
+                // Soft top-band gradient: lit on dark, shaded on light (see `emphasize`).
                 let hi_h = (bar_h * 45 / 100).max(1);
                 let hi = RECT { bottom: filled.top + hi_h, ..filled };
-                paint_rect(hdc, &hi, colorref(lighten(r), lighten(g), lighten(b)));
+                paint_rect(
+                    hdc,
+                    &hi,
+                    colorref(
+                        emphasize(r, light_bg),
+                        emphasize(g, light_bg),
+                        emphasize(b, light_bg),
+                    ),
+                );
             }
         }
     }
 }
 
 /// Draw a smooth area sparkline across `track`: a filled trend area under a
-/// crisp brighter top line, colored by the current (latest) value's load color
+/// crisp top line (lighter on the dark theme, darker on the light one; see
+/// `emphasize`), colored by the current (latest) value's load color
 /// (green→red). Newest sample on the right — an at-a-glance trend in the bar's
 /// space. The interpolated top reads cleanly even with few samples.
-unsafe fn draw_sparkline(hdc: HDC, track: &RECT, hist: &[f32]) {
+unsafe fn draw_sparkline(hdc: HDC, track: &RECT, hist: &[f32], light_bg: bool) {
     let n = hist.len();
     if n == 0 {
         return;
@@ -259,10 +277,14 @@ unsafe fn draw_sparkline(hdc: HDC, track: &RECT, hist: &[f32]) {
     SelectObject(hdc, prev_brush);
     SelectObject(hdc, prev_pen);
 
-    // Crisp brighter line along the top edge (skipped for a single sample).
+    // Crisp top line, emphasized for the theme (skipped for a single sample).
     if n >= 2 {
         let line: Vec<POINT> = (0..n).map(|i| POINT { x: x_at(i), y: y_at(hist[i]) }).collect();
-        let pen = CreatePen(PS_SOLID, 1, colorref(lighten(r), lighten(g), lighten(b)));
+        let pen = CreatePen(
+            PS_SOLID,
+            1,
+            colorref(emphasize(r, light_bg), emphasize(g, light_bg), emphasize(b, light_bg)),
+        );
         let prev = SelectObject(hdc, HGDIOBJ(pen.0));
         let _ = Polyline(hdc, &line);
         SelectObject(hdc, prev);
@@ -295,7 +317,7 @@ fn wide(s: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{header_h, label_h, row_block, win_w, window_height};
+    use super::{emphasize, header_h, label_h, row_block, win_w, window_height};
     use crate::dpi::Scale;
 
     #[test]
@@ -323,5 +345,25 @@ mod tests {
         // 200%
         assert_eq!(win_w(Scale(192), 14), 430);
         assert_eq!(window_height(Scale(192), 4, 14), 369);
+    }
+
+    #[test]
+    fn emphasize_dark_matches_old_lighten() {
+        // The dark theme keeps the old lighten(): 30% of the way toward white.
+        for c in 0..=255u8 {
+            let old = (c as u32 + (255 - c as u32) * 3 / 10) as u8;
+            assert_eq!(emphasize(c, false), old, "c = {c}");
+        }
+    }
+
+    #[test]
+    fn emphasize_light_darkens_by_30_percent() {
+        // The light theme moves 30% of the way toward black instead.
+        for c in 0..=255u8 {
+            assert_eq!(emphasize(c, true), (c as u32 * 7 / 10) as u8, "c = {c}");
+        }
+        assert_eq!(emphasize(200, true), 140);
+        assert_eq!(emphasize(255, true), 178);
+        assert_eq!(emphasize(0, true), 0);
     }
 }
