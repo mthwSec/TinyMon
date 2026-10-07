@@ -50,6 +50,19 @@ impl Row {
     pub fn rate(label: impl Into<String>, value: impl Into<String>, frac: f32) -> Row {
         Row { alert: false, ..Row::bar(label, value, frac) }
     }
+
+    /// A reading that cannot be taken: a value-only "n/a" row (no bar, no
+    /// alert), used instead of a misleading 0 or a missing row.
+    pub fn na(label: impl Into<String>) -> Row {
+        Row {
+            label: label.into(),
+            value: "n/a".into(),
+            bar: None,
+            color: None,
+            bar_color: None,
+            alert: false,
+        }
+    }
 }
 
 /// Stable identity for a metric — used for enable/disable and ordering.
@@ -304,12 +317,12 @@ pub fn sample_rows(order: &[MetricKey]) -> Vec<Row> {
                 }
             }
             MetricKey::Disk => {
-                out.push(crate::disk::disk_row("Disk R", 8.0 * 1024.0 * 1024.0));
-                out.push(crate::disk::disk_row("Disk W", 2.0 * 1024.0 * 1024.0));
+                out.push(crate::disk::disk_row("Disk R", Some(8.0 * 1024.0 * 1024.0)));
+                out.push(crate::disk::disk_row("Disk W", Some(2.0 * 1024.0 * 1024.0)));
             }
             MetricKey::Net => {
-                out.push(crate::net::net_row("Net\u{2191}", 1.5 * 1024.0 * 1024.0));
-                out.push(crate::net::net_row("Net\u{2193}", 6.0 * 1024.0 * 1024.0));
+                out.push(crate::net::net_row("Net\u{2191}", Some(1.5 * 1024.0 * 1024.0)));
+                out.push(crate::net::net_row("Net\u{2193}", Some(6.0 * 1024.0 * 1024.0)));
             }
             MetricKey::Uptime => out.push(uptime_row(13_329_000)),
             MetricKey::Battery => out.push(battery_row(&BatteryInfo {
@@ -429,5 +442,14 @@ mod tests {
         assert_eq!(fmt_rate(5.0 * 1024.0 * 1024.0), "5.0M/s");
         assert_eq!(fmt_rate(2048.0), "2K/s");
         assert_eq!(fmt_rate(300.0), "300B/s");
+    }
+
+    #[test]
+    fn na_row_is_value_only() {
+        let r = Row::na("Disk R");
+        assert_eq!(r.label, "Disk R");
+        assert_eq!(r.value, "n/a");
+        assert_eq!(r.bar, None);
+        assert!(!r.alert);
     }
 }

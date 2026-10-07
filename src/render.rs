@@ -388,8 +388,8 @@ mod tests {
     #[test]
     fn throughput_rows_never_alert() {
         // Both bars are full (1.0) with no bar_color: the old predicate said true.
-        assert!(!is_critical(&disk_row("Disk R", 500.0 * 1024.0 * 1024.0)));
-        assert!(!is_critical(&net_row("Net\u{2193}", 50e6)));
+        assert!(!is_critical(&disk_row("Disk R", Some(500.0 * 1024.0 * 1024.0))));
+        assert!(!is_critical(&net_row("Net\u{2193}", Some(50e6))));
     }
 
     #[test]
