@@ -6,11 +6,13 @@ use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
     PdhOpenQueryW, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
+    PDH_MORE_DATA, PDH_NO_DATA,
 };
 
 /// One PDH counter query. Opens an English counter `path` (which may contain a
 /// `(*)` wildcard), takes a baseline sample, and yields per-instance values on
-/// each `sample()`. Inert (no rows) if PDH/the counter is unavailable.
+/// each `try_sample()`. If PDH or the counter is unavailable, every
+/// `try_sample()` is `None` (and `sample()` is empty).
 pub struct PdhCounter {
     query: PDH_HQUERY,
     counter: PDH_HCOUNTER,
@@ -37,25 +39,41 @@ impl PdhCounter {
         self.ok
     }
 
-    /// Collect a fresh sample; return (lowercased instance name, value) for each
-    /// valid instance.
-    pub fn sample(&self) -> Vec<(String, f64)> {
-        let mut out = Vec::new();
+    /// Collect a fresh sample: (lowercased instance name, value) for each valid
+    /// instance. `None` when the reading failed: the counter was never added, or
+    /// collecting or formatting failed. `Some(empty)` means no instance was
+    /// reported (PDH_NO_DATA): no instances right now, a missing single
+    /// instance, or restricted access. It is not proof of health, so a caller
+    /// whose reading can never legitimately be empty maps it to n/a.
+    pub fn try_sample(&self) -> Option<Vec<(String, f64)>> {
         if !self.ok {
-            return out;
+            return None;
         }
+        let mut out = Vec::new();
         // SAFETY: PDH calls on our own handles. The first call sizes the buffer;
         // the second fills it. The buffer is `Vec<u64>` for 8-byte alignment
         // (PDH_FMT_COUNTERVALUE_ITEM_W holds a pointer + f64).
         unsafe {
-            if PdhCollectQueryData(self.query) != 0 {
-                return out;
+            match PdhCollectQueryData(self.query) {
+                0 => {}
+                PDH_NO_DATA => return Some(out),
+                _ => return None,
             }
             let mut size = 0u32;
             let mut count = 0u32;
-            PdhGetFormattedCounterArrayW(self.counter, PDH_FMT_DOUBLE, &mut size, &mut count, None);
+            match PdhGetFormattedCounterArrayW(
+                self.counter,
+                PDH_FMT_DOUBLE,
+                &mut size,
+                &mut count,
+                None,
+            ) {
+                0 | PDH_MORE_DATA => {}
+                PDH_NO_DATA => return Some(out),
+                _ => return None,
+            }
             if size == 0 {
-                return out;
+                return Some(out);
             }
             let mut buf = vec![0u64; (size as usize).div_ceil(8)];
             let mut bufsize = (buf.len() * 8) as u32;
@@ -67,7 +85,7 @@ impl PdhCounter {
                 Some(buf.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W),
             );
             if rc != 0 {
-                return out;
+                return None;
             }
             let items = core::slice::from_raw_parts(
                 buf.as_ptr() as *const PDH_FMT_COUNTERVALUE_ITEM_W,
@@ -81,7 +99,12 @@ impl PdhCounter {
                 }
             }
         }
-        out
+        Some(out)
+    }
+
+    /// `try_sample()` with a failed reading turned into an empty sample.
+    pub fn sample(&self) -> Vec<(String, f64)> {
+        self.try_sample().unwrap_or_default()
     }
 }
 
@@ -104,4 +127,24 @@ pub(crate) unsafe fn pwstr_to_string(p: PWSTR) -> String {
         len += 1;
     }
     String::from_utf16_lossy(core::slice::from_raw_parts(p.0, len)).to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PdhCounter;
+    use windows::core::w;
+
+    #[test]
+    fn missing_counter_is_a_failure_not_an_empty_sample() {
+        let c = PdhCounter::new(w!("\\No Such Object(*)\\No Such Counter"));
+        assert!(c.try_sample().is_none());
+        assert!(c.sample().is_empty());
+    }
+
+    #[test]
+    fn healthy_counter_yields_a_sample() {
+        // An instantaneous counter: valid on the first collect, whatever the timing.
+        let c = PdhCounter::new(w!("\\Memory\\Available Bytes"));
+        assert_eq!(c.try_sample().map(|s| s.len()), Some(1));
+    }
 }
