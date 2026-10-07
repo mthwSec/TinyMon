@@ -78,19 +78,25 @@ pub fn detect_gpus() -> Vec<GpuAdapter> {
                 budget
             };
             let luid = desc.AdapterLuid;
-            let luid_key = format!("luid_0x{:08x}_0x{:08x}", luid.HighPart as u32, luid.LowPart);
 
             gpus.push(GpuAdapter {
                 name: short_name(&utf16_to_string(&desc.Description)),
                 vram_total: total,
                 vram_used: used,
                 load: None,
-                luid_key,
+                luid_key: luid_key(luid.HighPart, luid.LowPart),
                 adapter: adapter3,
             });
         }
     }
     gpus
+}
+
+/// The "luid_0x<high>_0x<low>" token (lowercase hex, HighPart printed as
+/// unsigned) that PDH puts in the instance names of an adapter's counters,
+/// e.g. "pid_10680_luid_0x00000000_0x000109f8_phys_0_eng_0_engtype_3d".
+fn luid_key(high: i32, low: u32) -> String {
+    format!("luid_0x{:08x}_0x{:08x}", high as u32, low)
 }
 
 /// Vendor-neutral GPU utilization sampler backed by PDH "GPU Engine" counters.
@@ -288,6 +294,16 @@ mod tests {
     #[test]
     fn bare_vendor_word_kept() {
         assert_eq!(short_name("AMD"), "AMD");
+    }
+
+    #[test]
+    fn luid_key_matches_pdh_instance_names() {
+        assert_eq!(luid_key(0, 0x109f8), "luid_0x00000000_0x000109f8");
+        // A negative HighPart prints as unsigned hex, the way PDH writes it.
+        assert_eq!(luid_key(-1, 0xdeadbeef), "luid_0xffffffff_0xdeadbeef");
+        // PdhCounter lowercases instance names, so the key is an exact prefix.
+        let instance = "luid_0x00000000_0x000109F8_phys_0".to_lowercase();
+        assert!(instance.starts_with(&luid_key(0, 0x109f8)));
     }
 
     /// Diagnostic (no assertions), ignored by default: print the adapters
