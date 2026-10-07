@@ -23,8 +23,9 @@ pub struct HotkeySpec {
 
 /// Parse a textual hotkey like "ctrl+alt+m", or a bare key like "p" / "f8"
 /// (case-insensitive). Requires exactly one key (letter, digit, F1..F24, or the
-/// `0xNN` virtual-key fallback); modifiers are optional, so a single key is a
-/// valid global hotkey.
+/// `0xNN` virtual-key fallback): an unknown token or a second key ("ctrl+a+b")
+/// gives `None`. Modifiers are optional, so a single key is a valid global
+/// hotkey.
 pub fn parse_hotkey(s: &str) -> Option<HotkeySpec> {
     let mut mods = 0u32;
     let mut vk: Option<u32> = None;
@@ -35,8 +36,8 @@ pub fn parse_hotkey(s: &str) -> Option<HotkeySpec> {
             "shift" => mods |= MOD_SHIFT.0,
             "win" | "super" => mods |= MOD_WIN.0,
             _ => match key_to_vk(tok) {
-                Some(k) => vk = Some(k),
-                None => return None,
+                Some(k) if vk.is_none() => vk = Some(k),
+                _ => return None,
             },
         }
     }
@@ -166,6 +167,19 @@ mod tests {
         assert_eq!(parse_hotkey("ctrl+nope"), None);
         assert_eq!(parse_hotkey(""), None);
         assert_eq!(parse_hotkey("ctrl"), None);
+    }
+
+    #[test]
+    fn parse_rejects_two_keys() {
+        // Exactly one key: "Ctrl+A+B" used to bind Ctrl+B without a word.
+        assert_eq!(parse_hotkey("ctrl+a+b"), None);
+        assert_eq!(parse_hotkey("a+b"), None);
+        // A single key, with or without modifiers, parses as before.
+        assert_eq!(
+            parse_hotkey("ctrl+alt+m"),
+            Some(HotkeySpec { mods: MOD_CONTROL.0 | MOD_ALT.0, vk: 0x4D })
+        );
+        assert_eq!(parse_hotkey("0xDB"), Some(HotkeySpec { mods: 0, vk: 0xDB }));
     }
 
     #[test]
