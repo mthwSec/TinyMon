@@ -7,10 +7,13 @@
 //!
 //! Loading starts from the file this install saves to (see `load`), and the
 //! file's bytes are decoded leniently (`decode`): a UTF-16 or ANSI file reads
-//! as what it says instead of as "no config".
+//! as what it says instead of as "no config". Saving (`write`) normally renames
+//! a fully written temp file over the old one, so a crash leaves the old file or
+//! the new one, never an empty or torn one.
 
-use std::fs;
-use std::io::Write;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -150,9 +153,34 @@ pub fn resolve_write_path() -> Option<PathBuf> {
     None
 }
 
-/// Write the config to `path` (best-effort; errors are ignored).
-pub fn write(path: &Path, cfg: &Config) {
-    let _ = fs::write(path, serialize(cfg));
+/// Write the config to `path`. The text is staged in `<path>.tmp`, flushed to
+/// disk and renamed over `path`, so a crash leaves either the old file or the
+/// new one, never an empty or half-written one. The temp file is opened with
+/// share mode 0, so a second writer cannot interleave its bytes; it gets an
+/// error instead. If the rename fails, the temp file is deleted and the text is
+/// written in place as before (not atomic), so a reader that did not share
+/// delete does not cost the save; if that fails too, the rename's error is
+/// returned.
+pub fn write(path: &Path, cfg: &Config) -> io::Result<()> {
+    let text = serialize(cfg);
+    let tmp = tmp_path(path);
+    let mut f =
+        OpenOptions::new().write(true).create(true).truncate(true).share_mode(0).open(&tmp)?;
+    let staged = f.write_all(text.as_bytes()).and_then(|()| f.sync_all());
+    drop(f);
+    if let Err(e) = staged {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    // std's rename calls MoveFileExW(MOVEFILE_REPLACE_EXISTING) first. If that is
+    // denied, it retries as a POSIX-semantics FileRenameInfoEx rename (NTFS,
+    // Windows 10 1607+), which can replace a file another process holds open
+    // with FILE_SHARE_DELETE. It fails when the holder did not share delete, on
+    // FAT/exFAT with any open holder, and on a read-only target.
+    fs::rename(&tmp, path).or_else(|e| {
+        let _ = fs::remove_file(&tmp);
+        fs::write(path, &text).map_err(|_| e)
+    })
 }
 
 // ---- internals -------------------------------------------------------------
@@ -221,6 +249,13 @@ fn decode(bytes: &[u8]) -> String {
     }
 }
 
+/// `path` with ".tmp" appended (`tinymon.cfg.tmp`), built on the OS string.
+fn tmp_path(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".tmp");
+    PathBuf::from(s)
+}
+
 fn exe_dir() -> Option<PathBuf> {
     std::env::current_exe().ok()?.parent().map(Path::to_path_buf)
 }
@@ -242,6 +277,7 @@ fn dir_is_writable(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
     use std::time::Duration;
 
     /// A fresh, empty folder under %TEMP% for one test's files.
@@ -313,12 +349,11 @@ mod tests {
 
     #[test]
     fn file_write_read_roundtrip() {
-        let p = std::env::temp_dir().join("tinymon_test_cfg_roundtrip.cfg");
+        let p = scratch("roundtrip").join("tinymon.cfg");
         let c = Config { x: Some(7), y: Some(9), ..Default::default() };
-        write(&p, &c);
+        write(&p, &c).expect("write");
         let text = fs::read_to_string(&p).expect("cfg should exist");
         assert_eq!(parse(&text), c);
-        let _ = fs::remove_file(&p);
     }
 
     #[test]
@@ -464,5 +499,71 @@ mod tests {
         fs::write(&other, "opacity=77\n").expect("write other.cfg");
         assert_eq!(load_first(&[missing.clone(), other]).opacity, Some(77));
         assert_eq!(load_first(&[missing]), Config::default());
+    }
+
+    #[test]
+    fn write_replaces_file_instead_of_truncating_in_place() {
+        let p = scratch("write_replaces").join("tinymon.cfg");
+        fs::write(&p, "x=1\n").expect("seed");
+        // A reader holding the file open (std shares read, write and delete).
+        let mut reader = fs::File::open(&p).expect("open reader");
+        write(&p, &Config { x: Some(2), ..Default::default() }).expect("write");
+        let mut old = String::new();
+        reader.read_to_string(&mut old).expect("read through the old handle");
+        assert_eq!(old, "x=1\n");
+        assert_eq!(parse(&fs::read_to_string(&p).expect("read")).x, Some(2));
+        assert!(!tmp_path(&p).exists());
+    }
+
+    #[test]
+    fn write_leaves_read_only_target_untouched() {
+        let p = scratch("write_read_only").join("tinymon.cfg");
+        fs::write(&p, "x=1\n").expect("seed");
+        let writable = fs::metadata(&p).expect("metadata").permissions();
+        let mut read_only = writable.clone();
+        read_only.set_readonly(true);
+        fs::set_permissions(&p, read_only).expect("make read-only");
+        let res = write(&p, &Config { x: Some(2), ..Default::default() });
+        let content = fs::read_to_string(&p).expect("read");
+        fs::set_permissions(&p, writable).expect("make writable again");
+        assert!(res.is_err());
+        assert_eq!(content, "x=1\n");
+        assert!(!tmp_path(&p).exists());
+    }
+
+    #[test]
+    fn write_refuses_a_temp_another_writer_holds() {
+        let p = scratch("write_held_temp").join("tinymon.cfg");
+        fs::write(&p, "x=1\n").expect("seed");
+        // Another writer is in the middle of its own save.
+        let _held = fs::File::create(tmp_path(&p)).expect("hold the temp file");
+        assert!(write(&p, &Config { x: Some(2), ..Default::default() }).is_err());
+        assert_eq!(fs::read_to_string(&p).expect("read"), "x=1\n");
+    }
+
+    #[test]
+    fn refused_write_leaves_the_other_writers_temp_alone() {
+        let p = scratch("write_held_temp_kept").join("tinymon.cfg");
+        fs::write(&p, "x=1\n").expect("seed");
+        let mut held = fs::File::create(tmp_path(&p)).expect("hold the temp file");
+        held.write_all(b"x=3\n").expect("the other writer's bytes");
+        assert!(write(&p, &Config { x: Some(2), ..Default::default() }).is_err());
+        drop(held);
+        assert_eq!(fs::read_to_string(tmp_path(&p)).expect("temp still there"), "x=3\n");
+    }
+
+    #[test]
+    fn write_falls_back_in_place_when_rename_is_denied() {
+        let p = scratch("write_no_share_delete").join("tinymon.cfg");
+        fs::write(&p, "x=1\n").expect("seed");
+        // A holder that shares read and write but not delete blocks the rename.
+        let _holder = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x2) // FILE_SHARE_READ | FILE_SHARE_WRITE
+            .open(&p)
+            .expect("open holder");
+        write(&p, &Config { x: Some(2), ..Default::default() }).expect("write");
+        assert_eq!(parse(&fs::read_to_string(&p).expect("read")).x, Some(2));
+        assert!(!tmp_path(&p).exists());
     }
 }

@@ -807,7 +807,8 @@ unsafe fn persist(hwnd: HWND, st: &mut AppState) {
     if GetWindowRect(hwnd, &mut rect).is_ok() {
         st.settings.pos = Some((rect.left, rect.top));
     }
-    config::write(&path, &st.settings.to_config());
+    // Best-effort: the result is ignored, so a failed save is not reported.
+    let _ = config::write(&path, &st.settings.to_config());
 }
 
 /// Open the settings window (single-instance: focus it if already open).
