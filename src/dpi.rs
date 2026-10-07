@@ -13,9 +13,12 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 
-/// Make the process Per-Monitor-V2 DPI aware. Best-effort: on older Windows
-/// without this API the call simply fails and the OS keeps system-DPI scaling.
-/// Must run before any window or GDI sizing.
+/// Make the process Per-Monitor-V2 DPI aware. The embedded manifest
+/// (`tinymon.manifest`) already declares PMv2, so the loader applies it before
+/// `main` and this call then fails harmlessly; it is the fallback for a build
+/// without resources. Must run before any window or GDI sizing. The real minimum
+/// is Windows 10 1703: this and the other DPI functions are static imports, so
+/// an older Windows refuses to start the exe rather than falling back.
 pub fn set_process_dpi_aware() {
     // SAFETY: a one-shot, process-global call with a static context handle.
     unsafe {
@@ -78,5 +81,38 @@ mod tests {
         assert_eq!(Scale(144).px(200), 300); // 300.0
         assert_eq!(Scale(192).px(8), 16); // 16.0
         assert_eq!(Scale(192).px(200), 400); // 400.0
+    }
+
+    /// build.rs embeds `tinymon.manifest` as RT_MANIFEST #1 next to the version
+    /// info and the icon, and winres links those resources into the test binary
+    /// too. A build without the resource compiler has no RT_VERSION #1 either;
+    /// then there is nothing to check.
+    #[test]
+    fn exe_embeds_minimal_manifest() {
+        use windows::core::PCWSTR;
+        use windows::Win32::System::LibraryLoader::{
+            FindResourceW, LoadResource, LockResource, SizeofResource,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{RT_GROUP_ICON, RT_MANIFEST, RT_VERSION};
+        let id1 = PCWSTR(1 as _);
+        // SAFETY: looks up resources of this executable (module None); resource
+        // data stays mapped for the life of the process and is only read here.
+        unsafe {
+            if FindResourceW(None, id1, RT_VERSION).is_invalid() {
+                return;
+            }
+            let res = FindResourceW(None, id1, RT_MANIFEST);
+            assert!(!res.is_invalid(), "no RT_MANIFEST #1 resource");
+            let data = LoadResource(None, res).expect("LoadResource");
+            let len = SizeofResource(None, res) as usize;
+            let ptr = LockResource(data) as *const u8;
+            assert!(!ptr.is_null() && len > 0);
+            let text = std::str::from_utf8(std::slice::from_raw_parts(ptr, len)).expect("UTF-8");
+            assert!(text.contains("PerMonitorV2"));
+            assert!(text.contains("{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"));
+            assert!(text.contains("asInvoker"));
+            assert!(!text.contains("Microsoft.Windows.Common-Controls"));
+            assert!(!FindResourceW(None, id1, RT_GROUP_ICON).is_invalid(), "no RT_GROUP_ICON #1");
+        }
     }
 }
