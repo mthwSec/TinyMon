@@ -49,21 +49,17 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-    DestroyWindow,
-    DispatchMessageW, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos, GetMessageW,
-    GetSystemMetrics,
-    GetWindowLongPtrW, GetWindowRect, IsDialogMessageW, IsWindow, KillTimer, LoadCursorW,
-    PostMessageW, PostQuitMessage,
-    RegisterClassW, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, TrackPopupMenu, TranslateMessage, CREATESTRUCTW, CS_HREDRAW,
-    CS_VREDRAW, GA_ROOT, GWL_EXSTYLE, GWLP_USERDATA, HICON, HTCAPTION, IDC_ARROW, LWA_ALPHA,
-    MB_ICONWARNING, MB_OK, MessageBoxW, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG,
-    SM_CXSCREEN, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP,
-    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_HOTKEY,
-    WM_KEYDOWN,
-    WM_LBUTTONUP, WM_NCHITTEST, WM_NCRBUTTONUP, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    DestroyWindow, DispatchMessageW, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
+    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IsDialogMessageW, IsWindow,
+    KillTimer, LoadCursorW, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, TrackPopupMenu, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GA_ROOT,
+    GWLP_USERDATA, GWL_EXSTYLE, HICON, HTCAPTION, IDC_ARROW, LWA_ALPHA, MB_ICONWARNING, MB_OK,
+    MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, SM_CXSCREEN, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE,
+    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_HOTKEY, WM_KEYDOWN,
+    WM_LBUTTONUP, WM_NCHITTEST, WM_NCRBUTTONUP, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_TIMER,
+    WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, VK_ESCAPE, VK_RETURN, VK_TAB};
@@ -265,7 +261,11 @@ fn main() -> Result<()> {
             // Enter = OK, Esc = Cancel, Space toggles a checkbox, mnemonics).
             let sh = {
                 let p = state_ptr(hwnd);
-                if p.is_null() { HWND(core::ptr::null_mut()) } else { (*p).settings_hwnd }
+                if p.is_null() {
+                    HWND(core::ptr::null_mut())
+                } else {
+                    (*p).settings_hwnd
+                }
             };
             if !sh.0.is_null() && IsWindow(Some(sh)).as_bool() {
                 // While a hotkey-capture control is focused, bypass IsDialogMessageW
@@ -318,7 +318,12 @@ unsafe fn focused_is_hotkey() -> bool {
 
 /// Window procedure. The `unsafe extern "system"` signature is mandated by
 /// Win32; each branch documents the calls it makes.
-unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         // Stash the Box<AppState> pointer, start the timer (interval from
         // settings), add the tray icon.
@@ -332,7 +337,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             SetTimer(Some(hwnd), TIMER_ID, interval, None);
             if !p.is_null() {
                 // At startup, register silently (no popup if a combo is taken).
-                let _ = hotkeys::register(hwnd, (*p).settings.hotkey_toggle, (*p).settings.hotkey_settings);
+                let _ = hotkeys::register(
+                    hwnd,
+                    (*p).settings.hotkey_toggle,
+                    (*p).settings.hotkey_settings,
+                );
                 // Reconcile DPI if the window opened on a non-system-DPI monitor.
                 let st = &mut *p;
                 let real = dpi::dpi_for_window(hwnd);
@@ -400,7 +409,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     st.settings = Settings { pos, ..new };
 
                     if st.settings.opacity != old.opacity {
-                        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), st.settings.opacity, LWA_ALPHA);
+                        let _ = SetLayeredWindowAttributes(
+                            hwnd,
+                            COLORREF(0),
+                            st.settings.opacity,
+                            LWA_ALPHA,
+                        );
                     }
                     if st.settings.interval_ms != old.interval_ms {
                         let _ = KillTimer(Some(hwnd), TIMER_ID);
@@ -430,7 +444,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         || st.settings.hotkey_settings != old.hotkey_settings
                     {
                         hotkeys::unregister(hwnd);
-                        let res = hotkeys::register(hwnd, st.settings.hotkey_toggle, st.settings.hotkey_settings);
+                        let res = hotkeys::register(
+                            hwnd,
+                            st.settings.hotkey_toggle,
+                            st.settings.hotkey_settings,
+                        );
                         warn_hotkey_conflicts(hwnd, st, &res);
                     }
                     let _ = InvalidateRect(Some(hwnd), None, false);
@@ -502,7 +520,17 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         s.rows(&mut rows);
                     }
                     let theme = if st.settings.light { &LIGHT } else { &THEME };
-                    render_rows(st.back_dc, w, h, &rows, st.font, Scale(st.dpi), st.settings.font_px, theme, &st.history);
+                    render_rows(
+                        st.back_dc,
+                        w,
+                        h,
+                        &rows,
+                        st.font,
+                        Scale(st.dpi),
+                        st.settings.font_px,
+                        theme,
+                        &st.history,
+                    );
                     let _ = BitBlt(hdc, 0, 0, w, h, Some(st.back_dc), 0, 0, SRCCOPY);
                 }
             }
@@ -530,9 +558,25 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 // Honor the OS-suggested position; keep our own row-driven size.
                 let r = lparam.0 as *const RECT;
                 if r.is_null() {
-                    let _ = SetWindowPos(hwnd, None, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        0,
+                        0,
+                        w,
+                        h,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
                 } else {
-                    let _ = SetWindowPos(hwnd, None, (*r).left, (*r).top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        (*r).left,
+                        (*r).top,
+                        w,
+                        h,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
                 }
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
@@ -634,11 +678,7 @@ unsafe fn show_context_menu(hwnd: HWND) {
     }
     let theme_flags = if light { MF_STRING | MF_CHECKED } else { MF_STRING };
     let _ = AppendMenuW(menu, theme_flags, ID_THEME, w!("Light theme"));
-    let startup_flags = if startup::is_enabled() {
-        MF_STRING | MF_CHECKED
-    } else {
-        MF_STRING
-    };
+    let startup_flags = if startup::is_enabled() { MF_STRING | MF_CHECKED } else { MF_STRING };
     let _ = AppendMenuW(menu, startup_flags, ID_STARTUP, w!("Start with Windows"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let _ = AppendMenuW(menu, MF_STRING, ID_EXIT, w!("Exit"));
@@ -730,7 +770,8 @@ unsafe fn toggle_lock(hwnd: HWND) {
 /// work area with the standard margin, then persist the new position.
 unsafe fn snap_to_corner(hwnd: HWND, corner: usize) {
     let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-    let mut mi = MONITORINFO { cbSize: core::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    let mut mi =
+        MONITORINFO { cbSize: core::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
     if !GetMonitorInfoW(mon, &mut mi).as_bool() {
         return;
     }
@@ -803,8 +844,14 @@ unsafe fn warn_hotkey_conflicts(hwnd: HWND, st: &AppState, res: &hotkeys::Regist
         "These hotkeys couldn't be registered (already in use by another app):\n\n{lines}\nPick a different combination in Settings."
     );
     let text: Vec<u16> = body.encode_utf16().chain(core::iter::once(0)).collect();
-    let title: Vec<u16> = "TinyMon \u{2014} hotkey in use".encode_utf16().chain(core::iter::once(0)).collect();
-    let _ = MessageBoxW(Some(hwnd), PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), MB_OK | MB_ICONWARNING);
+    let title: Vec<u16> =
+        "TinyMon \u{2014} hotkey in use".encode_utf16().chain(core::iter::once(0)).collect();
+    let _ = MessageBoxW(
+        Some(hwnd),
+        PCWSTR(text.as_ptr()),
+        PCWSTR(title.as_ptr()),
+        MB_OK | MB_ICONWARNING,
+    );
 }
 
 /// Snapshot of the current settings (read by the settings window to seed it).
@@ -866,7 +913,7 @@ unsafe fn destroy_back_buffer(st: &mut AppState) {
 pub(crate) unsafe fn create_mono_font(scale: Scale, px: i32) -> HFONT {
     let mut lf = LOGFONTW {
         lfHeight: -scale.px(px),
-        lfWeight: 400,          // FW_NORMAL
+        lfWeight: 400, // FW_NORMAL
         lfQuality: CLEARTYPE_QUALITY,
         lfPitchAndFamily: 0x31, // FIXED_PITCH | FF_MODERN (monospace fallback)
         ..Default::default()
@@ -878,5 +925,3 @@ pub(crate) unsafe fn create_mono_font(scale: Scale, px: i32) -> HFONT {
     // owns the returned HFONT and must DeleteObject it (done in WM_DESTROY).
     CreateFontIndirectW(&lf)
 }
-
-

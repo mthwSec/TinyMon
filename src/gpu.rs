@@ -35,7 +35,8 @@ impl GpuAdapter {
         let Some(a) = &self.adapter else { return };
         let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
         // SAFETY: COM call on a live interface; `info` is a stack out-param.
-        if unsafe { a.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info) }.is_ok() {
+        if unsafe { a.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info) }.is_ok()
+        {
             self.vram_used = info.CurrentUsage;
         }
     }
@@ -64,9 +65,7 @@ pub fn detect_gpus() -> Vec<GpuAdapter> {
             let (mut used, mut budget) = (0u64, 0u64);
             if let Some(a) = &adapter3 {
                 let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
-                if a.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info)
-                    .is_ok()
-                {
+                if a.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info).is_ok() {
                     used = info.CurrentUsage;
                     budget = info.Budget;
                 }
@@ -115,7 +114,9 @@ impl GpuLoadSampler {
         for g in gpus.iter_mut() {
             let max = samples
                 .iter()
-                .filter(|(name, v)| (single || name.contains(&g.luid_key)) && (0.0..=100.5).contains(v))
+                .filter(|(name, v)| {
+                    (single || name.contains(&g.luid_key)) && (0.0..=100.5).contains(v)
+                })
                 .map(|(_, v)| *v)
                 .fold(0.0f64, f64::max);
             g.load = Some(max.clamp(0.0, 100.0) as f32);

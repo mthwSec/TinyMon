@@ -22,28 +22,28 @@ use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POI
 use windows::Win32::Graphics::Gdi::{
     AlphaBlend, BeginPaint, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontIndirectW,
     CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect,
-    GetStockObject, InvalidateRect, Polyline, SelectObject, SetBkColor, SetBkMode, SetDCBrushColor,
-    RoundRect, SetTextColor, BLENDFUNCTION, CLEARTYPE_QUALITY, DC_BRUSH, DRAW_TEXT_FORMAT, DT_CENTER,
-    DT_LEFT, DT_SINGLELINE, DT_VCENTER, HBRUSH, HDC, HFONT, HGDIOBJ, LOGFONTW, NULL_BRUSH,
-    PAINTSTRUCT, PS_SOLID, TRANSPARENT,
+    GetStockObject, InvalidateRect, Polyline, RoundRect, SelectObject, SetBkColor, SetBkMode,
+    SetDCBrushColor, SetTextColor, BLENDFUNCTION, CLEARTYPE_QUALITY, DC_BRUSH, DRAW_TEXT_FORMAT,
+    DT_CENTER, DT_LEFT, DT_SINGLELINE, DT_VCENTER, HBRUSH, HDC, HFONT, HGDIOBJ, LOGFONTW,
+    NULL_BRUSH, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     InitCommonControlsEx, CDDS_ITEMPREPAINT, CDDS_PREPAINT, DRAWITEMSTRUCT, HKM_GETHOTKEY,
-    HKM_SETHOTKEY, HOTKEYF_ALT, HOTKEYF_CONTROL, HOTKEYF_SHIFT, ICC_BAR_CLASSES,
-    ICC_HOTKEY_CLASS, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, NMCUSTOMDRAW, NMHDR, ODS_DEFAULT,
-    ODS_FOCUS, ODS_SELECTED, TBM_SETPOS, TBM_SETRANGE,
+    HKM_SETHOTKEY, HOTKEYF_ALT, HOTKEYF_CONTROL, HOTKEYF_SHIFT, ICC_BAR_CLASSES, ICC_HOTKEY_CLASS,
+    ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, NMCUSTOMDRAW, NMHDR, ODS_DEFAULT, ODS_FOCUS,
+    ODS_SELECTED, TBM_SETPOS, TBM_SETRANGE,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, MOD_ALT, MOD_CONTROL, MOD_SHIFT};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetDlgItem, GetParent,
-    GetWindowLongPtrW, GetWindowRect, GetWindowTextW, PostMessageW, RegisterClassW,
-    SendMessageW, SetWindowLongPtrW, SetWindowPos, BS_OWNERDRAW,
-    CREATESTRUCTW, CW_USEDEFAULT, ES_NUMBER, GWLP_USERDATA, HMENU, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOZORDER, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CTLCOLORBTN,
-    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_CREATE, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND,
-    WM_GETFONT, WM_HSCROLL, WM_NOTIFY, WM_PAINT, WM_SETFOCUS, WM_SETFONT, WM_SETTEXT, WNDCLASSW,
-    WS_BORDER, WS_CAPTION, WS_CHILD, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    GetWindowLongPtrW, GetWindowRect, GetWindowTextW, PostMessageW, RegisterClassW, SendMessageW,
+    SetWindowLongPtrW, SetWindowPos, BS_OWNERDRAW, CREATESTRUCTW, CW_USEDEFAULT, ES_NUMBER,
+    GWLP_USERDATA, HMENU, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY,
+    WM_DRAWITEM, WM_ERASEBKGND, WM_GETFONT, WM_HSCROLL, WM_NOTIFY, WM_PAINT, WM_SETFOCUS,
+    WM_SETFONT, WM_SETTEXT, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_OVERLAPPED, WS_SYSMENU,
+    WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::config::Config;
@@ -285,11 +285,8 @@ unsafe extern "system" fn settings_proc(
     match msg {
         WM_CREATE => {
             let cs = lparam.0 as *const CREATESTRUCTW;
-            let main = if cs.is_null() {
-                HWND(core::ptr::null_mut())
-            } else {
-                HWND((*cs).lpCreateParams)
-            };
+            let main =
+                if cs.is_null() { HWND(core::ptr::null_mut()) } else { HWND((*cs).lpCreateParams) };
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, main.0 as isize);
             build_controls(hwnd, main);
             LRESULT(0)
@@ -336,7 +333,9 @@ unsafe extern "system" fn settings_proc(
                 IDC_HK_SETTINGS_CLR => clear_hotkey(hwnd, IDC_HK_SETTINGS),
                 // Live-preview triggers: the font edit changed, or a metric toggled.
                 IDC_FONT if notif == EN_CHANGE => refresh_preview(hwnd),
-                _ if (IDC_METRIC_BASE..IDC_METRIC_BASE + MetricKey::ALL.len() as i32).contains(&id) => {
+                _ if (IDC_METRIC_BASE..IDC_METRIC_BASE + MetricKey::ALL.len() as i32)
+                    .contains(&id) =>
+                {
                     // Toggle this row's metric on/off in the working list.
                     let p = (id - IDC_METRIC_BASE) as usize;
                     METRIC_STATE.with(|st| {
@@ -346,7 +345,9 @@ unsafe extern "system" fn settings_proc(
                     render_metric_rows(hwnd);
                     refresh_preview(hwnd);
                 }
-                _ if (IDC_MOVEUP_BASE..IDC_MOVEUP_BASE + MetricKey::ALL.len() as i32).contains(&id) => {
+                _ if (IDC_MOVEUP_BASE..IDC_MOVEUP_BASE + MetricKey::ALL.len() as i32)
+                    .contains(&id) =>
+                {
                     let p = (id - IDC_MOVEUP_BASE) as usize;
                     if p > 0 {
                         METRIC_STATE.with(|st| st.borrow_mut().swap(p, p - 1));
@@ -354,7 +355,9 @@ unsafe extern "system" fn settings_proc(
                         refresh_preview(hwnd);
                     }
                 }
-                _ if (IDC_MOVEDN_BASE..IDC_MOVEDN_BASE + MetricKey::ALL.len() as i32).contains(&id) => {
+                _ if (IDC_MOVEDN_BASE..IDC_MOVEDN_BASE + MetricKey::ALL.len() as i32)
+                    .contains(&id) =>
+                {
                     let p = (id - IDC_MOVEDN_BASE) as usize;
                     if p + 1 < MetricKey::ALL.len() {
                         METRIC_STATE.with(|st| st.borrow_mut().swap(p, p + 1));
@@ -445,7 +448,19 @@ unsafe fn build_controls(hwnd: HWND, main: HWND) {
     // every control's position/size to the window's DPI.
     let s = dscale();
     let child = |class, text, style: u32, x, y, w, h, id| unsafe {
-        control(hwnd, class, text, WINDOW_STYLE(style), s.px(x), s.px(y), s.px(w), s.px(h), id, hinstance, font)
+        control(
+            hwnd,
+            class,
+            text,
+            WINDOW_STYLE(style),
+            s.px(x),
+            s.px(y),
+            s.px(w),
+            s.px(h),
+            id,
+            hinstance,
+            font,
+        )
     };
     let base = WS_CHILD.0 | WS_VISIBLE.0;
     let tab = base | WS_TABSTOP.0;
@@ -460,7 +475,8 @@ unsafe fn build_controls(hwnd: HWND, main: HWND) {
         let y = lay.metrics_top + 18 + p * 22;
         child(w!("BUTTON"), "", btn, 22, y, 190, 18, IDC_METRIC_BASE + p); // checkbox (label set on render)
         child(w!("BUTTON"), "\u{25B2}", btn, 216, y, 22, 18, IDC_MOVEUP_BASE + p); // ▲ move up
-        child(w!("BUTTON"), "\u{25BC}", btn, 240, y, 22, 18, IDC_MOVEDN_BASE + p); // ▼ move down
+        child(w!("BUTTON"), "\u{25BC}", btn, 240, y, 22, 18, IDC_MOVEDN_BASE + p);
+        // ▼ move down
     }
     render_metric_rows(hwnd);
 
@@ -474,20 +490,40 @@ unsafe fn build_controls(hwnd: HWND, main: HWND) {
 
     let interval_text = cur.interval_ms.to_string();
     child(w!("STATIC"), "Update interval (ms)", base, 22, a + 80, 150, 16, 0);
-    child(w!("EDIT"), &interval_text, tab | WS_BORDER.0 | ES_NUMBER as u32, 196, a + 78, 62, 22, IDC_INTERVAL);
+    child(
+        w!("EDIT"),
+        &interval_text,
+        tab | WS_BORDER.0 | ES_NUMBER as u32,
+        196,
+        a + 78,
+        62,
+        22,
+        IDC_INTERVAL,
+    );
 
     let font_text = cur.font_px.to_string();
     child(w!("STATIC"), "Font size (px)", base, 22, a + 108, 150, 16, 0);
-    child(w!("EDIT"), &font_text, tab | WS_BORDER.0 | ES_NUMBER as u32, 196, a + 106, 62, 22, IDC_FONT);
+    child(
+        w!("EDIT"),
+        &font_text,
+        tab | WS_BORDER.0 | ES_NUMBER as u32,
+        196,
+        a + 106,
+        62,
+        22,
+        IDC_FONT,
+    );
 
     // --- Hotkeys (each capture field has a Clear button) --- (card in `paint_chrome`)
     let k = lay.hk_top;
     child(w!("STATIC"), "Show / Hide", base, 22, k + 20, 160, 16, 0);
-    let hk1 = child(w!("msctls_hotkey32"), "", tab | WS_BORDER.0, 22, k + 38, 170, 22, IDC_HK_TOGGLE);
+    let hk1 =
+        child(w!("msctls_hotkey32"), "", tab | WS_BORDER.0, 22, k + 38, 170, 22, IDC_HK_TOGGLE);
     set_hotkey_control(hk1, cur.hotkey_toggle);
     child(w!("BUTTON"), "Clear", btn, 200, k + 38, 56, 22, IDC_HK_TOGGLE_CLR);
     child(w!("STATIC"), "Open settings", base, 22, k + 66, 160, 16, 0);
-    let hk2 = child(w!("msctls_hotkey32"), "", tab | WS_BORDER.0, 22, k + 84, 170, 22, IDC_HK_SETTINGS);
+    let hk2 =
+        child(w!("msctls_hotkey32"), "", tab | WS_BORDER.0, 22, k + 84, 170, 22, IDC_HK_SETTINGS);
     set_hotkey_control(hk2, cur.hotkey_settings);
     child(w!("BUTTON"), "Clear", btn, 200, k + 84, 56, 22, IDC_HK_SETTINGS_CLR);
 
@@ -504,7 +540,16 @@ unsafe fn build_controls(hwnd: HWND, main: HWND) {
     // --- Live preview (right column) — a real mini-widget rendered with the SAME
     // render_rows as the widget, updated as the controls change. (card in `paint_chrome`) ---
     let px = CLIENT_W + GUTTER;
-    child(PREVIEW_CLASS, "", base | WS_BORDER.0, px + 10, 26, PREVIEW_W - 20, lay.client_h - 44, IDC_PREVIEW);
+    child(
+        PREVIEW_CLASS,
+        "",
+        base | WS_BORDER.0,
+        px + 10,
+        26,
+        PREVIEW_W - 20,
+        lay.client_h - 44,
+        IDC_PREVIEW,
+    );
 
     // Start focus on the first checkbox so Tab has somewhere to go; seed preview.
     if let Ok(c) = GetDlgItem(Some(hwnd), IDC_METRIC_BASE) {
@@ -543,7 +588,12 @@ unsafe fn reset_to_defaults(hwnd: HWND) {
 }
 
 /// Window procedure for the live-preview child window.
-unsafe extern "system" fn preview_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn preview_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
@@ -601,7 +651,12 @@ unsafe fn paint_preview(hwnd: HWND) {
         render_rows(mem, w, ch, &rows, font, scale, font_px, theme, &preview_hist);
         SetDCBrushColor(hdc, COLORREF(theme.bg));
         FillRect(hdc, &rc, HBRUSH(GetStockObject(DC_BRUSH).0));
-        let bf = BLENDFUNCTION { BlendOp: 0, BlendFlags: 0, SourceConstantAlpha: opacity, AlphaFormat: 0 };
+        let bf = BLENDFUNCTION {
+            BlendOp: 0,
+            BlendFlags: 0,
+            SourceConstantAlpha: opacity,
+            AlphaFormat: 0,
+        };
         let _ = AlphaBlend(hdc, 0, y_off, w, ch, mem, 0, 0, w, ch, bf);
 
         SelectObject(mem, prev);
@@ -792,7 +847,8 @@ unsafe fn draw_button(dis: &DRAWITEMSTRUCT) {
     round_panel(dis.hDC, &rc, s.px(6), face, border);
     if focused {
         let i = s.px(2);
-        let r = RECT { left: rc.left + i, top: rc.top + i, right: rc.right - i, bottom: rc.bottom - i };
+        let r =
+            RECT { left: rc.left + i, top: rc.top + i, right: rc.right - i, bottom: rc.bottom - i };
         round_outline(dis.hDC, &r, s.px(5), if primary { dark::ON_ACCENT } else { dark::ACCENT });
     }
     draw_label(dis.hDC, &rc, dis.hwndItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE, text);

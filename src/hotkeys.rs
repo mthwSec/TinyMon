@@ -120,9 +120,13 @@ pub unsafe fn register(
                 .is_err();
     }
     if let Some(h) = settings {
-        res.settings_failed =
-            RegisterHotKey(Some(hwnd), HK_SETTINGS, HOT_KEY_MODIFIERS(h.mods | MOD_NOREPEAT.0), h.vk)
-                .is_err();
+        res.settings_failed = RegisterHotKey(
+            Some(hwnd),
+            HK_SETTINGS,
+            HOT_KEY_MODIFIERS(h.mods | MOD_NOREPEAT.0),
+            h.vk,
+        )
+        .is_err();
     }
     res
 }
@@ -156,7 +160,8 @@ mod tests {
         // A bare (modifier-less) key is a valid global hotkey now.
         assert_eq!(parse_hotkey("m"), Some(HotkeySpec { mods: 0, vk: 0x4D }));
         assert_eq!(parse_hotkey("f8"), Some(HotkeySpec { mods: 0, vk: 0x77 }));
-        assert_eq!(parse_hotkey("0xDB"), Some(HotkeySpec { mods: 0, vk: 0xDB })); // '[' (VK_OEM_4)
+        // '[' (VK_OEM_4)
+        assert_eq!(parse_hotkey("0xDB"), Some(HotkeySpec { mods: 0, vk: 0xDB }));
         // Still rejected: unknown key, nothing at all, or modifiers with no key.
         assert_eq!(parse_hotkey("ctrl+nope"), None);
         assert_eq!(parse_hotkey(""), None);
@@ -176,10 +181,18 @@ mod tests {
         // The hotkey control can capture keys outside A-Z/0-9/F1-F24 (arrows,
         // Home, OEM ';' / '['). These serialize via the "0xNN" fallback and MUST
         // parse back — both bare and with modifiers — or the combo vanishes on save.
-        for vk in [0x25u32 /*Left*/, 0x24 /*Home*/, 0xBA /*OEM ;*/, 0xDB /*OEM [*/] {
+        for vk in
+            [0x25u32 /*Left*/, 0x24 /*Home*/, 0xBA /*OEM ;*/, 0xDB /*OEM [*/]
+        {
             for mods in [0, MOD_CONTROL.0 | MOD_ALT.0] {
                 let h = HotkeySpec { mods, vk };
-                assert_eq!(parse_hotkey(&format_hotkey(h)), Some(h), "vk {:#04X} mods {:#X}", vk, mods);
+                assert_eq!(
+                    parse_hotkey(&format_hotkey(h)),
+                    Some(h),
+                    "vk {:#04X} mods {:#X}",
+                    vk,
+                    mods
+                );
             }
         }
     }

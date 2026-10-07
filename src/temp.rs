@@ -7,8 +7,8 @@
 
 use windows::core::{w, BSTR, PCWSTR};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoSetProxyBlanket, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
-    EOAC_NONE, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE,
+    CoCreateInstance, CoInitializeEx, CoSetProxyBlanket, CLSCTX_INPROC_SERVER,
+    COINIT_MULTITHREADED, EOAC_NONE, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE,
 };
 use windows::Win32::System::Variant::{
     VariantChangeType, VariantClear, VARIANT, VAR_CHANGE_FLAGS, VT_BSTR, VT_R8,
@@ -73,7 +73,13 @@ impl TempSource {
             }
         } else {
             // Nothing available (no LHM, no thermal zone). Keep the metric visible.
-            out.push(Row { label: "Temp".into(), value: "n/a".into(), bar: None, color: None, bar_color: None });
+            out.push(Row {
+                label: "Temp".into(),
+                value: "n/a".into(),
+                bar: None,
+                color: None,
+                bar_color: None,
+            });
         }
     }
 }

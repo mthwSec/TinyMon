@@ -101,13 +101,7 @@ pub unsafe fn create_app_icon(px: i32) -> HICON {
     let mask_bits = vec![0u8; stride * px as usize];
     let mask = CreateBitmap(px, px, 1, 1, Some(mask_bits.as_ptr() as *const c_void));
 
-    let ii = ICONINFO {
-        fIcon: BOOL(1),
-        xHotspot: 0,
-        yHotspot: 0,
-        hbmMask: mask,
-        hbmColor: dib,
-    };
+    let ii = ICONINFO { fIcon: BOOL(1), xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: dib };
     let icon = CreateIconIndirect(&ii).unwrap_or(null);
 
     // The icon owns copies; release our bitmaps.

@@ -30,7 +30,13 @@ pub struct Row {
 impl Row {
     /// A standard row with a load-colored bar.
     pub fn bar(label: impl Into<String>, value: impl Into<String>, frac: f32) -> Row {
-        Row { label: label.into(), value: value.into(), bar: Some(frac), color: None, bar_color: None }
+        Row {
+            label: label.into(),
+            value: value.into(),
+            bar: Some(frac),
+            color: None,
+            bar_color: None,
+        }
     }
 }
 
@@ -115,7 +121,7 @@ impl MetricKey {
             MetricKey::Uptime => (144, 160, 176), // gray-blue
             MetricKey::Battery => (160, 210, 90), // lime
             #[cfg(feature = "temp")]
-            MetricKey::Temp => (224, 128, 80),    // orange
+            MetricKey::Temp => (224, 128, 80), // orange
         }
     }
     /// Every metric, in the order they appear in the settings list.
@@ -155,15 +161,24 @@ impl MetricKey {
 
 /// A live, stateful metric source. Some variants emit multiple rows.
 pub enum MetricSource {
-    Cpu { sampler: CpuSampler, pct: f32 },
-    Ram { info: MemInfo },
+    Cpu {
+        sampler: CpuSampler,
+        pct: f32,
+    },
+    Ram {
+        info: MemInfo,
+    },
     Gpu(GpuGroup),
     Vram(VramGroup),
     PerCpu(PerCpuSampler),
     Disk(DiskSampler),
     Net(NetSampler),
-    Uptime { ms: u64 },
-    Battery { info: BatteryInfo },
+    Uptime {
+        ms: u64,
+    },
+    Battery {
+        info: BatteryInfo,
+    },
     #[cfg(feature = "temp")]
     Temp(crate::temp::TempSource),
 }

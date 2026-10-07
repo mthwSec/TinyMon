@@ -96,7 +96,12 @@ mod tests {
 
     #[test]
     fn clamps_out_of_range_prefs() {
-        let c = Config { opacity: Some(0), interval_ms: Some(50), font_px: Some(99), ..Default::default() };
+        let c = Config {
+            opacity: Some(0),
+            interval_ms: Some(50),
+            font_px: Some(99),
+            ..Default::default()
+        };
         let s = Settings::from_config(&c);
         assert_eq!(s.opacity, MIN_OPACITY);
         assert_eq!(s.interval_ms, MIN_INTERVAL_MS);
@@ -105,7 +110,10 @@ mod tests {
 
     #[test]
     fn metrics_map_and_drop_unknown() {
-        let c = Config { metrics: Some(vec!["gpu".into(), "bogus".into(), "cpu".into()]), ..Default::default() };
+        let c = Config {
+            metrics: Some(vec!["gpu".into(), "bogus".into(), "cpu".into()]),
+            ..Default::default()
+        };
         assert_eq!(Settings::from_config(&c).order, vec![MetricKey::Gpu, MetricKey::Cpu]);
     }
 

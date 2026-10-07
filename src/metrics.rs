@@ -44,16 +44,9 @@ fn lerp(a: u8, b: u8, t: f32) -> u8 {
 /// Map a 0..=1 load fraction to an (R, G, B) color: green -> yellow -> red.
 pub fn load_color(load: f32) -> (u8, u8, u8) {
     let l = load.clamp(0.0, 1.0);
-    let (from, to, t) = if l < 0.5 {
-        (GREEN, YELLOW, l / 0.5)
-    } else {
-        (YELLOW, RED, (l - 0.5) / 0.5)
-    };
-    (
-        lerp(from.0, to.0, t),
-        lerp(from.1, to.1, t),
-        lerp(from.2, to.2, t),
-    )
+    let (from, to, t) =
+        if l < 0.5 { (GREEN, YELLOW, l / 0.5) } else { (YELLOW, RED, (l - 0.5) / 0.5) };
+    (lerp(from.0, to.0, t), lerp(from.1, to.1, t), lerp(from.2, to.2, t))
 }
 
 /// Rolling CPU sampler: remembers the previous poll so each new poll yields the
@@ -79,11 +72,7 @@ impl CpuSampler {
         if ok.is_err() {
             return 0.0;
         }
-        let cur = (
-            filetime_ticks(idle),
-            filetime_ticks(kernel),
-            filetime_ticks(user),
-        );
+        let cur = (filetime_ticks(idle), filetime_ticks(kernel), filetime_ticks(user));
         let pct = match self.prev {
             Some(p) => cpu_percent(
                 cur.0.wrapping_sub(p.0),
@@ -107,10 +96,8 @@ pub struct MemInfo {
 
 /// Read current physical memory usage via `GlobalMemoryStatusEx`.
 pub fn read_memory() -> MemInfo {
-    let mut ms = MEMORYSTATUSEX {
-        dwLength: size_of::<MEMORYSTATUSEX>() as u32,
-        ..Default::default()
-    };
+    let mut ms =
+        MEMORYSTATUSEX { dwLength: size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
     // SAFETY: GlobalMemoryStatusEx fills the buffer we own; dwLength tells it
     // the struct size so it knows the layout/version.
     if unsafe { GlobalMemoryStatusEx(&mut ms) }.is_err() {

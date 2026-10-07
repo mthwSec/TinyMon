@@ -41,12 +41,7 @@ impl NetSampler {
 
 /// Sum a `Network Interface(*)` counter over real adapters only.
 fn sum_real(counter: &mut PdhCounter) -> f64 {
-    counter
-        .sample()
-        .iter()
-        .filter(|(name, _)| !is_pseudo(name))
-        .map(|(_, v)| *v)
-        .sum()
+    counter.sample().iter().filter(|(name, _)| !is_pseudo(name)).map(|(_, v)| *v).sum()
 }
 
 /// Skip software/virtual interfaces so the total reflects real traffic.
