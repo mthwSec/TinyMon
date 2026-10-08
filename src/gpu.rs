@@ -230,7 +230,8 @@ pub fn short_name(desc: &str) -> String {
     for junk in ["(R)", "(TM)", "(C)", "®", "™"] {
         s = s.replace(junk, "");
     }
-    // Normalise whitespace first: "Radeon (TM) Graphics" strips like "Radeon(TM) Graphics".
+    // Normalise whitespace once, first: "Radeon (TM) Graphics" strips like
+    // "Radeon(TM) Graphics", and no later step adds a double or outer space.
     s = s.split_whitespace().collect::<Vec<_>>().join(" ");
     // Drop the leading company word, then the brand word (the spec keeps "Intel").
     for company in ["AMD ", "NVIDIA "] {
@@ -250,11 +251,10 @@ pub fn short_name(desc: &str) -> String {
     if s == "Graphics" {
         s = branded.replace(" Graphics", "");
     }
-    let cleaned = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if cleaned.is_empty() {
+    if s.is_empty() {
         desc.trim().to_string()
     } else {
-        cleaned
+        s
     }
 }
 
@@ -604,6 +604,14 @@ mod tests {
     fn odd_spacing_is_normalised_before_stripping() {
         assert_eq!(short_name("AMD Radeon (TM) Graphics"), "Radeon");
         assert_eq!(short_name("NVIDIA  GeForce RTX 4080"), "RTX 4080");
+    }
+
+    #[test]
+    fn messy_whitespace_comes_out_trimmed_and_single_spaced() {
+        // The one whitespace squash, right after junk removal, also trims and turns
+        // tabs into single spaces; no later step adds a space.
+        assert_eq!(short_name("  Intel(R)\tUHD   Graphics 770 "), "Intel UHD 770");
+        assert_eq!(short_name("\tNVIDIA GeForce  RTX 4080\t"), "RTX 4080");
     }
 
     #[test]
