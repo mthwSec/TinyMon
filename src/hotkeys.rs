@@ -183,6 +183,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_counts_a_repeated_key_and_allows_a_modifier_after_the_key() {
+        // The same key twice is still a second key.
+        assert_eq!(parse_hotkey("a+a"), None);
+        // Only the number of keys matters, not their position.
+        assert_eq!(parse_hotkey("m+ctrl"), Some(HotkeySpec { mods: MOD_CONTROL.0, vk: 0x4D }));
+    }
+
+    #[test]
     fn round_trip() {
         for s in ["Ctrl+M", "Ctrl+Alt+F12", "Alt+Shift+7", "P", "F8"] {
             let h = parse_hotkey(s).unwrap();

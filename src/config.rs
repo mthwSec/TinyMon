@@ -391,6 +391,25 @@ mod tests {
     }
 
     #[test]
+    fn value_ends_at_the_first_hash() {
+        // A comment may itself hold a '#': the value still ends at the first one.
+        let c = parse("x=5  # see #12\nhotkey_toggle=Ctrl+M # was #3\n");
+        assert_eq!(c.x, Some(5));
+        assert_eq!(c.hotkey_toggle.as_deref(), Some("Ctrl+M"));
+    }
+
+    #[test]
+    fn comment_only_value_is_empty() {
+        // `key=# note` is an empty value. An empty metrics list means "all hidden"
+        // (only a missing key means the defaults), an empty number or boolean is
+        // unset, and an empty hotkey stays as text that binds nothing.
+        let c = parse("metrics=  # none\nopacity=# x\nlight=# x\nhotkey_toggle=# none\n");
+        assert_eq!(c.metrics, Some(Vec::new()));
+        assert_eq!((c.opacity, c.light), (None, None));
+        assert_eq!(c.hotkey_toggle.as_deref(), Some(""));
+    }
+
+    #[test]
     fn owner_config_still_parses_identically() {
         // The owner's real 137-byte file; its hotkeys are the bare keys "]" and "[".
         let text = "x=-213\ny=-16\nmetrics=cpu,ram,gpu,temp,uptime\nopacity=188\n\
@@ -447,6 +466,13 @@ mod tests {
     }
 
     #[test]
+    fn decode_drops_a_utf8_bom() {
+        // decode's own promise, not only parse's tolerance: without the strip the
+        // three bytes would become three spaces, which trim() hides from parse.
+        assert_eq!(decode(b"\xEF\xBB\xBFopacity=199"), "opacity=199");
+    }
+
+    #[test]
     fn decode_invalid_utf8_is_lossy_not_fatal() {
         // An ANSI comment line: invalid UTF-8, which made the whole file unreadable.
         let c = parse(&decode(b"metrics=cpu\n# caf\xE9 \xE1\xE2\nopacity=150\n"));
@@ -460,6 +486,15 @@ mod tests {
         let c = parse(&decode(b"metrics=cpu,\xC2\xA0ram\nx=1\xC2\xA0\ny=2\n"));
         assert_eq!(c.metrics, Some(vec!["cpu".into(), "ram".into()]));
         assert_eq!((c.x, c.y), (Some(1), Some(2)));
+    }
+
+    #[test]
+    fn decode_reads_an_ansi_no_break_space_as_a_space() {
+        // A Windows-1252 no-break space is the lone byte A0 (invalid UTF-8): it
+        // trims away like the UTF-8 form C2 A0 instead of becoming U+FFFD.
+        let c = parse(&decode(b"x=1\xA0\nmetrics=cpu,\xA0ram\n"));
+        assert_eq!(c.x, Some(1));
+        assert_eq!(c.metrics, Some(vec!["cpu".into(), "ram".into()]));
     }
 
     #[test]
@@ -502,6 +537,21 @@ mod tests {
     }
 
     #[test]
+    fn load_first_skips_an_unreadable_file() {
+        // The file exists, so load()'s metadata check keeps it, but it cannot be
+        // read: another handle holds it without sharing. The next file is used,
+        // not the defaults (which the next save would write over the user's file).
+        let d = scratch("load_first_unreadable");
+        let locked = d.join("locked.cfg");
+        let other = d.join("other.cfg");
+        fs::write(&locked, "opacity=150\n").expect("write locked.cfg");
+        fs::write(&other, "opacity=77\n").expect("write other.cfg");
+        let _held = fs::OpenOptions::new().read(true).share_mode(0).open(&locked).expect("hold");
+        assert!(fs::metadata(&locked).and_then(|m| m.modified()).is_ok());
+        assert_eq!(load_first(&[locked, other]).opacity, Some(77));
+    }
+
+    #[test]
     fn write_replaces_file_instead_of_truncating_in_place() {
         let p = scratch("write_replaces").join("tinymon.cfg");
         fs::write(&p, "x=1\n").expect("seed");
@@ -512,6 +562,19 @@ mod tests {
         reader.read_to_string(&mut old).expect("read through the old handle");
         assert_eq!(old, "x=1\n");
         assert_eq!(parse(&fs::read_to_string(&p).expect("read")).x, Some(2));
+        assert!(!tmp_path(&p).exists());
+    }
+
+    #[test]
+    fn write_overwrites_a_stale_temp() {
+        // A crash left a closed temp file, longer than the next save: it is
+        // truncated, so none of its old tail is renamed into the config.
+        let p = scratch("write_stale_temp").join("tinymon.cfg");
+        fs::write(&p, "x=1\n").expect("seed");
+        fs::write(tmp_path(&p), "x=1\ny=2\nmetrics=cpu,ram,gpu\nlight=false\n").expect("stale");
+        let cfg = Config { light: Some(true), ..Default::default() };
+        write(&p, &cfg).expect("write");
+        assert_eq!(fs::read_to_string(&p).expect("read"), serialize(&cfg));
         assert!(!tmp_path(&p).exists());
     }
 
