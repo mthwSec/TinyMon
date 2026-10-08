@@ -70,7 +70,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, VK_ESCAPE, VK_RETURN
 use dpi::Scale;
 use history::{row_ids, History};
 use registry::{build_sources, collect_rows, MetricSource, Row};
-use render::{render_rows, win_w, window_height, BG_COLOR, LIGHT, THEME};
+use render::{render_rows, widget_size, win_w, window_height, BG_COLOR, LIGHT, THEME};
 use settings::Settings;
 
 // ---- Layout ----------------------------------------------------------------
@@ -135,7 +135,8 @@ struct AppState {
     in_move: bool,
     /// The widget's top-left when that move loop started.
     move_start: (i32, i32),
-    /// The row count the window was last sized for (place_widget, relayout).
+    /// The row count the window was last sized for, rows the work-area cap
+    /// leaves out included (place_widget, relayout).
     sized_rows: usize,
     // Cached off-screen back buffer for double buffering; recreated on resize.
     back_dc: HDC,
@@ -148,23 +149,24 @@ struct AppState {
     settings_hwnd: HWND,
 }
 
-/// The widget's size for its current rows at the current DPI + font, and the
-/// row count it is sized for.
-fn fitted_size(st: &AppState) -> (i32, i32, usize) {
-    let scale = Scale(st.dpi);
+/// The widget's size for its current rows at the current DPI + font, at most
+/// `max_h` tall (whole rows; render_rows counts the rest as "+N"), and the row
+/// count it is sized for, rows left out included.
+fn fitted_size(st: &AppState, max_h: i32) -> (i32, i32, usize) {
     let mut tmp: Vec<Row> = Vec::new();
     for s in &st.sources {
         s.rows(&mut tmp);
     }
-    let w = win_w(scale, st.settings.font_px);
-    (w, window_height(scale, tmp.len() as i32, st.settings.font_px), tmp.len())
+    let (w, h, _) = widget_size(Scale(st.dpi), st.settings.font_px, tmp.len(), max_h);
+    (w, h, tmp.len())
 }
 
 /// Put the widget, sized for its current rows, at its home, or as close to it
 /// as the work area nearest to home allows (home is kept, so the widget goes
 /// back once home fits again). With no home yet (the first run), the top-right
-/// corner of the primary work area becomes home and is saved. SetWindowPos
-/// sends messages to the widget, so it runs after the borrow ends.
+/// corner of the primary work area becomes home and is saved. The widget is at
+/// most as tall as that work area. SetWindowPos sends messages to the widget,
+/// so it runs after the borrow ends.
 unsafe fn place_widget(hwnd: HWND) {
     let p = state_ptr(hwnd);
     if p.is_null() {
@@ -172,16 +174,21 @@ unsafe fn place_widget(hwnd: HWND) {
     }
     let (x, y, w, h) = {
         let st = &mut *p;
-        let (w, h, n) = fitted_size(st);
-        let ((x, y), displaced) = match st.settings.pos {
+        // The work area nearest to home at the widget's full height, or the
+        // primary one on the first run; its height caps the widget's.
+        let wa = match st.settings.pos {
             Some((hx, hy)) => {
+                let (w, h, _) = fitted_size(st, i32::MAX);
                 let (right, bottom) = (hx.saturating_add(w), hy.saturating_add(h));
-                let near = placement::work_area_near(&RECT { left: hx, top: hy, right, bottom });
-                placement::place((hx, hy), w, h, near)
+                placement::work_area_near(&RECT { left: hx, top: hy, right, bottom })
             }
+            None => placement::primary_work_area(),
+        };
+        let (w, h, n) = fitted_size(st, wa.bottom - wa.top);
+        let ((x, y), displaced) = match st.settings.pos {
+            Some(home) => placement::place(home, w, h, wa),
             None => {
                 // The first run: the top-right corner of the primary work area.
-                let wa = placement::primary_work_area();
                 let home = placement::corner_xy(1, w, h, wa, Scale(st.dpi).px(MARGIN));
                 st.settings.pos = Some(home);
                 persist(st);
@@ -197,13 +204,14 @@ unsafe fn place_widget(hwnd: HWND) {
 
 /// Resize the widget for its current rows at the current DPI and font, from
 /// `from` (WM_DPICHANGED's suggested rect) or, with None, from the window's own
-/// rect. With `anchor`, the edges nearest the work area's edges stay put (a
-/// widget in a corner grows away from it) and the result is fitted into the
-/// work area; without it (during a drag) the top-left stays. Home follows the
-/// widget only as placement::after_relayout allows: never to a clamped spot,
-/// never while displaced or dragged, and never without `track_home`. Returns
-/// whether home changed. SetWindowPos sends messages to the widget, so it runs
-/// after the borrow ends.
+/// rect, at most as tall as the work area nearest to that rect. With `anchor`,
+/// the edges nearest the work area's edges stay put (a widget in a corner grows
+/// away from it) and the result is fitted into the work area; without it
+/// (during a drag) the top-left stays. Home follows the widget only as
+/// placement::after_relayout allows: never to a clamped spot, never while
+/// displaced or dragged, and never without `track_home`. Returns whether home
+/// changed. SetWindowPos sends messages to the widget, so it runs after the
+/// borrow ends.
 unsafe fn relayout(hwnd: HWND, from: Option<RECT>, anchor: bool, track_home: bool) -> bool {
     let old = match from {
         Some(r) => r,
@@ -221,12 +229,10 @@ unsafe fn relayout(hwnd: HWND, from: Option<RECT>, anchor: bool, track_home: boo
     }
     let (x, y, w, h, moved) = {
         let st = &mut *p;
-        let (w, h, n) = fitted_size(st);
-        let (spot, clamped) = if anchor {
-            placement::anchored(old, w, h, placement::work_area_near(&old))
-        } else {
-            ((old.left, old.top), false)
-        };
+        let wa = placement::work_area_near(&old);
+        let (w, h, n) = fitted_size(st, wa.bottom - wa.top);
+        let (spot, clamped) =
+            if anchor { placement::anchored(old, w, h, wa) } else { ((old.left, old.top), false) };
         let (home, displaced) = placement::after_relayout(
             st.settings.pos,
             spot,

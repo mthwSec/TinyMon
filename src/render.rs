@@ -94,7 +94,8 @@ pub fn win_w(scale: Scale, font_px: i32) -> i32 {
 pub fn header_h(scale: Scale, font_px: i32) -> i32 {
     label_h(scale, font_px) + scale.px(2) + 1 + scale.px(ROW_GAP)
 }
-/// Window height for `n_rows` metric rows plus the header at `scale`/`font_px`.
+/// Window height for `n_rows` metric rows plus the header at `scale`/`font_px`,
+/// uncapped (`widget_size` caps it to a work area's height).
 pub fn window_height(scale: Scale, n_rows: i32, font_px: i32) -> i32 {
     2 * scale.px(PAD)
         + header_h(scale, font_px)
@@ -102,10 +103,31 @@ pub fn window_height(scale: Scale, n_rows: i32, font_px: i32) -> i32 {
         + (n_rows - 1).max(0) * scale.px(ROW_GAP)
 }
 
+/// How many of `n` rows fit in `max_h` device pixels: the largest k <= n with
+/// `window_height(k) <= max_h` (0 when not even the header fits).
+pub fn rows_fitting(scale: Scale, font_px: i32, max_h: i32, n: usize) -> usize {
+    (0..=n).rev().find(|&k| window_height(scale, k as i32, font_px) <= max_h).unwrap_or(0)
+}
+
+/// The widget's width and height for `n` rows when it may be at most `max_h`
+/// tall (its work area's height), and how many rows it shows: whole rows only;
+/// the last rows in the user's order are left out, and the header counts them.
+pub fn widget_size(scale: Scale, font_px: i32, n: usize, max_h: i32) -> (i32, i32, usize) {
+    let shown = rows_fitting(scale, font_px, max_h, n);
+    (win_w(scale, font_px), window_height(scale, shown as i32, font_px), shown)
+}
+
+/// The header's count of the rows left out: "+N", or None when all rows show.
+pub fn overflow_label(total: usize, shown: usize) -> Option<String> {
+    (total > shown).then(|| format!("+{}", total - shown))
+}
+
 /// Render `rows` into a `w`×`h` device-pixel surface using `font`/`scale`/`theme`.
 /// Pure view: no `AppState`, no sampling — the widget and the settings preview
-/// both call this, so they stay pixel-for-pixel consistent. `history[i]` is row
-/// i's recent bar values, oldest first; `bar_style` decides how they draw.
+/// both call this, so they stay pixel-for-pixel consistent. Only the rows that
+/// fit in `h` are drawn, whole and in order (`rows_fitting`); the header then
+/// shows "+N" for the rest at its right end. `history[i]` is row i's recent bar
+/// values, oldest first; `bar_style` decides how they draw.
 #[expect(clippy::too_many_arguments)]
 pub unsafe fn render_rows(
     hdc: HDC,
@@ -129,12 +151,20 @@ pub unsafe fn render_rows(
     let pad = scale.px(PAD);
     let content_right = w - pad;
     let lh = label_h(scale, font_px);
+    // Whole rows only: a row that does not fit is left out, never cut.
+    let shown = rows_fitting(scale, font_px, h, rows.len());
+    let more = overflow_label(rows.len(), shown);
+    let rows = &rows[..shown];
 
     // Header: a dim title + a hairline separator. Pure hierarchy / drag affordance
     // (the whole window already drags via HTCAPTION).
     SetTextColor(hdc, COLORREF(theme.header_fg));
     let mut hdr = RECT { left: pad, top: pad, right: content_right, bottom: pad + lh };
     DrawTextW(hdc, &mut wide("TinyMon"), &mut hdr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    // The count of the rows left out, right-aligned in the same band.
+    if let Some(more) = more {
+        DrawTextW(hdc, &mut wide(&more), &mut hdr, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+    }
     let sep_y = pad + lh + scale.px(2);
     paint_rect(
         hdc,
@@ -142,7 +172,8 @@ pub unsafe fn render_rows(
         COLORREF(theme.track),
     );
 
-    // Uniform value column = the widest value, so numbers don't jump row-to-row.
+    // Uniform value column = the widest value shown, so numbers don't jump
+    // row-to-row (a left-out row's wide value must not narrow the labels).
     let col_gap = scale.px(COL_GAP);
     let value_col_w = rows
         .iter()
@@ -363,8 +394,8 @@ fn wide(s: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bar_style, emphasize, header_h, is_critical, label_h, row_block, spark_area, spark_line,
-        win_w, window_height, BarStyle,
+        bar_style, emphasize, header_h, is_critical, label_h, overflow_label, row_block,
+        rows_fitting, spark_area, spark_line, widget_size, win_w, window_height, BarStyle,
     };
     use crate::battery::{battery_row, BatteryInfo};
     use crate::disk::disk_row;
@@ -401,6 +432,35 @@ mod tests {
         // 200%
         assert_eq!(win_w(Scale(192), 14), 430);
         assert_eq!(window_height(Scale(192), 4, 14), 369);
+    }
+
+    #[test]
+    fn rows_fitting_inverts_window_height() {
+        for (s, f) in [(Scale(96), 13), (Scale(144), 16)] {
+            for n in 0..40usize {
+                let h = window_height(s, n as i32, f);
+                assert_eq!(rows_fitting(s, f, h, 40), n, "{s:?} font {f}: {n} rows");
+                if n >= 1 {
+                    assert_eq!(rows_fitting(s, f, h - 1, 40), n - 1, "{s:?} font {f}: {n} rows");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn widget_size_caps_height_to_work_area() {
+        // 1080p at 150%: a 1020 px work area holds 17 of 20 rows.
+        let (w, h, shown) = widget_size(Scale(144), 13, 20, 1020);
+        assert_eq!((w, h, shown), (300, 989, 17));
+        assert!(shown <= 20);
+        assert_eq!(h, window_height(Scale(144), shown as i32, 13));
+        assert_eq!(widget_size(Scale(96), 13, 5, 1080), (200, 216, 5));
+    }
+
+    #[test]
+    fn overflow_label_counts_hidden_rows() {
+        assert_eq!(overflow_label(20, 17).as_deref(), Some("+3"));
+        assert_eq!(overflow_label(5, 5), None);
     }
 
     #[test]
