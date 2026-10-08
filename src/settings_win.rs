@@ -649,7 +649,8 @@ unsafe fn paint_preview(hwnd: HWND) {
         // Reflect the widget's light/dark choice in the preview.
         let main = HWND(GetWindowLongPtrW(parent, GWLP_USERDATA) as *mut c_void);
         let theme = if !main.0.is_null() && current_settings(main).light { &LIGHT } else { &THEME };
-        render_rows(mem, w, ch, &rows, font, scale, font_px, theme, &preview_hist);
+        let hist: Vec<&[f32]> = preview_hist.iter().map(Vec::as_slice).collect();
+        render_rows(mem, w, ch, &rows, font, scale, font_px, theme, &hist);
         SetDCBrushColor(hdc, COLORREF(theme.bg));
         FillRect(hdc, &rc, HBRUSH(GetStockObject(DC_BRUSH).0));
         let bf = BLENDFUNCTION {

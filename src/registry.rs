@@ -296,6 +296,19 @@ pub fn build_sources(settings: &Settings) -> Vec<MetricSource> {
         .collect()
 }
 
+/// Every source's rows in display order, each tagged with its source's metric
+/// (`keys[i]` is the metric of `rows[i]`): the one flatten that painting and
+/// the sparkline history (`history::row_ids`) read rows through.
+pub fn collect_rows(sources: &[MetricSource]) -> (Vec<Row>, Vec<MetricKey>) {
+    let mut rows = Vec::new();
+    let mut keys = Vec::new();
+    for s in sources {
+        s.rows(&mut rows);
+        keys.resize(rows.len(), s.key());
+    }
+    (rows, keys)
+}
+
 /// Representative placeholder rows for the settings live-preview — built through
 /// the real formatters (so the preview can't drift) with canned values, so it
 /// opens no PDH queries and touches no hardware.
@@ -451,5 +464,17 @@ mod tests {
         assert_eq!(r.value, "n/a");
         assert_eq!(r.bar, None);
         assert!(!r.alert);
+    }
+
+    #[test]
+    fn collect_rows_tags_each_row_with_its_metric() {
+        let sources = [
+            MetricSource::Uptime { ms: 3_600_000 },
+            MetricSource::Ram { info: MemInfo { load_pct: 58.0, used_gib: 9.3, total_gib: 16.0 } },
+        ];
+        let (rows, keys) = collect_rows(&sources);
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, ["Up", "RAM"]);
+        assert_eq!(keys, [MetricKey::Uptime, MetricKey::Ram]);
     }
 }

@@ -18,6 +18,7 @@ mod dpi;
 // emits no metric. See src/fps.rs.
 mod fps;
 mod gpu;
+mod history;
 mod hotkeys;
 mod icon;
 mod metrics;
@@ -66,7 +67,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, VK_ESCAPE, VK_RETURN, VK_TAB};
 
 use dpi::Scale;
-use registry::{build_sources, MetricSource, Row};
+use history::{row_ids, History};
+use registry::{build_sources, collect_rows, MetricSource, Row};
 use render::{render_rows, win_w, window_height, BG_COLOR, LIGHT, THEME};
 use settings::Settings;
 
@@ -102,8 +104,9 @@ pub(crate) const WM_APP_SETTINGS_CLOSED: u32 = WM_APP + 3;
 /// Per-window state, owned via GWLP_USERDATA for the window's lifetime.
 struct AppState {
     sources: Vec<MetricSource>,
-    /// Per-row recent bar values for the sparklines (index = row position).
-    history: Vec<Vec<f32>>,
+    /// Recent bar values for the sparklines, kept per row identity (metric,
+    /// label, nth), so they survive row-count changes, reorders and Apply.
+    history: History,
     settings: Settings,
     font: HFONT,
     /// Current monitor DPI (96 = 100%); drives all layout scaling.
@@ -141,29 +144,6 @@ fn fitted_size(st: &AppState) -> (i32, i32) {
 /// widget, so no AppState reference may be live across this call.
 unsafe fn apply_window_size(hwnd: HWND, (w, h): (i32, i32)) {
     let _ = SetWindowPos(hwnd, None, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-}
-
-/// Recent samples kept per row for the sparklines (~last minute at a 1s interval).
-const HIST_LEN: usize = 64;
-
-/// Append the latest bar value of each row to its sparkline history, rebuilding
-/// the buffer when the row count changes (a metric toggled, or a variable-row
-/// metric like per-core CPU / GPUs changed count).
-unsafe fn update_history(st: &mut AppState) {
-    let mut rows: Vec<Row> = Vec::new();
-    for s in &st.sources {
-        s.rows(&mut rows);
-    }
-    if st.history.len() != rows.len() {
-        st.history = vec![Vec::new(); rows.len()];
-    }
-    for (i, row) in rows.iter().enumerate() {
-        let h = &mut st.history[i];
-        h.push(row.bar.unwrap_or(0.0));
-        if h.len() > HIST_LEN {
-            h.remove(0);
-        }
-    }
 }
 
 fn main() -> Result<()> {
@@ -225,7 +205,7 @@ fn main() -> Result<()> {
 
         let state = Box::new(AppState {
             sources,
-            history: Vec::new(),
+            history: History::default(),
             settings,
             font,
             dpi,
@@ -377,7 +357,8 @@ unsafe extern "system" fn wnd_proc(
                 for s in st.sources.iter_mut() {
                     s.sample();
                 }
-                update_history(st);
+                let (rows, keys) = collect_rows(&st.sources);
+                st.history.record(&row_ids(&keys, &rows), &rows);
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             LRESULT(0)
@@ -476,10 +457,9 @@ unsafe extern "system" fn wnd_proc(
                 let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
                 ensure_back_buffer(st, hdc, w, h);
                 if !st.back_dc.0.is_null() {
-                    let mut rows: Vec<Row> = Vec::new();
-                    for s in &st.sources {
-                        s.rows(&mut rows);
-                    }
+                    let (rows, keys) = collect_rows(&st.sources);
+                    let ids = row_ids(&keys, &rows);
+                    let hist: Vec<&[f32]> = ids.iter().map(|id| st.history.get(id)).collect();
                     let theme = if st.settings.light { &LIGHT } else { &THEME };
                     render_rows(
                         st.back_dc,
@@ -490,7 +470,7 @@ unsafe extern "system" fn wnd_proc(
                         Scale(st.dpi),
                         st.settings.font_px,
                         theme,
-                        &st.history,
+                        &hist,
                     );
                     let _ = BitBlt(hdc, 0, 0, w, h, Some(st.back_dc), 0, 0, SRCCOPY);
                 }
@@ -846,11 +826,11 @@ unsafe fn apply_settings(hwnd: HWND, new: Settings) -> Option<String> {
         }
         let order_changed = st.settings.order != old.order;
         if order_changed {
+            // The sparkline history is kept: series follow their rows by identity.
             st.sources = build_sources(&st.settings);
             for s in st.sources.iter_mut() {
                 s.sample();
             }
-            st.history.clear(); // rebuilt for the new row set on next tick
         }
         // The widget's size depends on both the row count (metrics) and the
         // font (rows + width scale with it): measured here, applied below.

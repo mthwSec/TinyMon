@@ -104,7 +104,8 @@ pub fn window_height(scale: Scale, n_rows: i32, font_px: i32) -> i32 {
 
 /// Render `rows` into a `w`×`h` device-pixel surface using `font`/`scale`/`theme`.
 /// Pure view: no `AppState`, no sampling — the widget and the settings preview
-/// both call this, so they stay pixel-for-pixel consistent.
+/// both call this, so they stay pixel-for-pixel consistent. `history[i]` is row
+/// i's recent bar values, oldest first; `bar_style` decides how they draw.
 #[expect(clippy::too_many_arguments)]
 pub unsafe fn render_rows(
     hdc: HDC,
@@ -115,7 +116,7 @@ pub unsafe fn render_rows(
     scale: Scale,
     font_px: i32,
     theme: &RenderTheme,
-    history: &[Vec<f32>],
+    history: &[&[f32]],
 ) {
     // Clear the whole frame to the background using the stock DC brush.
     let full = RECT { left: 0, top: 0, right: w, bottom: h };
@@ -154,7 +155,7 @@ pub unsafe fn render_rows(
     let rb = row_block(scale, font_px);
     for (i, row) in rows.iter().enumerate() {
         let y = rows_top + i as i32 * (rb + scale.px(ROW_GAP));
-        let hist: &[f32] = history.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
+        let hist: &[f32] = history.get(i).copied().unwrap_or(&[]);
         draw_row(hdc, w, y, scale, lh, row, theme, value_col_w, hist);
     }
 
@@ -169,6 +170,27 @@ const ALERT_AT: f32 = 0.9;
 /// (`Row::rate`), battery and value-only rows never alert.
 pub fn is_critical(row: &Row) -> bool {
     row.alert && row.bar.is_some_and(|f| f >= ALERT_AT)
+}
+
+/// How a row's bar band is drawn.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum BarStyle {
+    /// No band: a value-only row.
+    None,
+    /// A solid bar at the row's current level.
+    Level,
+    /// A sparkline of the row's recent samples.
+    Spark,
+}
+
+/// A bar row draws a sparkline once it has two samples to connect, unless its
+/// bar has a fixed color (battery); before that, a solid level bar.
+fn bar_style(row: &Row, samples: &[f32]) -> BarStyle {
+    match row.bar {
+        None => BarStyle::None,
+        Some(_) if samples.len() >= 2 && row.bar_color.is_none() => BarStyle::Spark,
+        Some(_) => BarStyle::Level,
+    }
 }
 
 /// Draw one row: accent-colored label (left, ellipsized) + value (right) sharing
@@ -228,9 +250,10 @@ unsafe fn draw_row(
         paint_rect(hdc, &RECT { bottom: track.top + 1, ..track }, COLORREF(theme.track_edge));
 
         let f = frac.clamp(0.0, 1.0);
-        // Load metrics with accumulated history render as a per-sample sparkline;
-        // rows with a fixed bar color (e.g. battery) keep a solid level bar.
-        if !hist.is_empty() && row.bar_color.is_none() {
+        // Bar rows, load and throughput alike, draw their recent samples as a
+        // sparkline; a row with fewer than two samples or a fixed bar color
+        // (battery) draws a solid level bar (`bar_style`).
+        if bar_style(row, hist) == BarStyle::Spark {
             draw_sparkline(hdc, &track, hist, light_bg);
         } else {
             let fill_w = ((track.right - track.left) as f32 * f).round() as i32;
@@ -255,52 +278,63 @@ unsafe fn draw_row(
     }
 }
 
-/// Draw a smooth area sparkline across `track`: a filled trend area under a
-/// crisp top line (lighter on the dark theme, darker on the light one; see
-/// `emphasize`), colored by the current (latest) value's load color
-/// (green→red). Newest sample on the right — an at-a-glance trend in the bar's
-/// space. The interpolated top reads cleanly even with few samples.
+/// Draw an area sparkline inside `track`: a filled trend area under a crisp
+/// top line (lighter on the dark theme, darker on the light one; see
+/// `emphasize`), colored by the newest sample's load color (green to red).
+/// Newest sample on the right: an at-a-glance trend in the bar's space. The
+/// geometry (`spark_line`, `spark_area`) keeps every pixel inside the track.
 unsafe fn draw_sparkline(hdc: HDC, track: &RECT, hist: &[f32], light_bg: bool) {
-    let n = hist.len();
-    if n == 0 {
-        return;
-    }
-    let tw = track.right - track.left;
-    let th = track.bottom - track.top;
-    let (r, g, b) = load_color(hist[n - 1].clamp(0.0, 1.0));
-    let x_at = |i: usize| -> i32 {
-        if n == 1 {
-            track.right
-        } else {
-            track.left + tw * i as i32 / (n as i32 - 1)
-        }
-    };
-    let y_at = |v: f32| -> i32 { track.bottom - (th as f32 * v.clamp(0.0, 1.0)).round() as i32 };
+    let Some(&last) = hist.last() else { return };
+    let (r, g, b) = load_color(last.clamp(0.0, 1.0));
+    let line = spark_line(track, hist);
 
-    // Filled area: the sample points, closed down to the track baseline.
-    let mut area: Vec<POINT> = (0..n).map(|i| POINT { x: x_at(i), y: y_at(hist[i]) }).collect();
-    area.push(POINT { x: x_at(n - 1), y: track.bottom });
-    area.push(POINT { x: x_at(0), y: track.bottom });
+    // Filled area: under the line, down to the track's bottom row.
     SetDCBrushColor(hdc, colorref(r, g, b));
     let prev_brush = SelectObject(hdc, GetStockObject(DC_BRUSH));
     let prev_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
-    let _ = Polygon(hdc, &area);
+    let _ = Polygon(hdc, &spark_area(track, &line));
     SelectObject(hdc, prev_brush);
     SelectObject(hdc, prev_pen);
 
-    // Crisp top line, emphasized for the theme (skipped for a single sample).
-    if n >= 2 {
-        let line: Vec<POINT> = (0..n).map(|i| POINT { x: x_at(i), y: y_at(hist[i]) }).collect();
-        let pen = CreatePen(
-            PS_SOLID,
-            1,
-            colorref(emphasize(r, light_bg), emphasize(g, light_bg), emphasize(b, light_bg)),
-        );
-        let prev = SelectObject(hdc, HGDIOBJ(pen.0));
-        let _ = Polyline(hdc, &line);
-        SelectObject(hdc, prev);
-        let _ = DeleteObject(HGDIOBJ(pen.0));
-    }
+    // Crisp top line, emphasized for the theme.
+    let pen = CreatePen(
+        PS_SOLID,
+        1,
+        colorref(emphasize(r, light_bg), emphasize(g, light_bg), emphasize(b, light_bg)),
+    );
+    let prev = SelectObject(hdc, HGDIOBJ(pen.0));
+    let _ = Polyline(hdc, &line);
+    SelectObject(hdc, prev);
+    let _ = DeleteObject(HGDIOBJ(pen.0));
+}
+
+/// The sparkline's top line inside `track`, newest sample on the right: x runs
+/// over [left, right - 1] and y over [top, bottom - 1] (a value of 0 on the
+/// bottom row, 1 on the top row). A last horizontal stub to (right, y) paints
+/// the last column, since GDI leaves out a line's end point. One sample is a
+/// flat line (the divisor is at least 1); no samples, no line.
+fn spark_line(track: &RECT, hist: &[f32]) -> Vec<POINT> {
+    let Some(&last) = hist.last() else { return Vec::new() };
+    let span = (hist.len() as i32 - 1).max(1);
+    let (w, h) = (track.right - 1 - track.left, track.bottom - 1 - track.top);
+    let y_at = |v: f32| track.bottom - 1 - (h as f32 * v.clamp(0.0, 1.0)).round() as i32;
+    let mut line: Vec<POINT> = hist
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| POINT { x: track.left + w * i as i32 / span, y: y_at(v) })
+        .collect();
+    line.push(POINT { x: track.right, y: y_at(last) });
+    line
+}
+
+/// The area under `line`, closed through (right, bottom) and (left, bottom):
+/// GDI's polygon fill leaves out the right and bottom edges, so the fill ends
+/// on the track's last column and bottom row.
+fn spark_area(track: &RECT, line: &[POINT]) -> Vec<POINT> {
+    let mut area = line.to_vec();
+    area.push(POINT { x: track.right, y: track.bottom });
+    area.push(POINT { x: track.left, y: track.bottom });
+    area
 }
 
 /// Fill a rectangle with a solid color via the stock DC brush (no allocation).
@@ -328,7 +362,10 @@ fn wide(s: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{emphasize, header_h, is_critical, label_h, row_block, win_w, window_height};
+    use super::{
+        bar_style, emphasize, header_h, is_critical, label_h, row_block, spark_area, spark_line,
+        win_w, window_height, BarStyle,
+    };
     use crate::battery::{battery_row, BatteryInfo};
     use crate::disk::disk_row;
     use crate::dpi::Scale;
@@ -337,6 +374,7 @@ mod tests {
     use crate::net::net_row;
     use crate::percpu::percpu_row;
     use crate::registry::{cpu_row, ram_row, uptime_row};
+    use windows::Win32::Foundation::{POINT, RECT};
 
     #[test]
     fn geometry_identity_at_96() {
@@ -422,5 +460,56 @@ mod tests {
         };
         assert!(!is_critical(&battery_row(&full)));
         assert!(!is_critical(&uptime_row(3_600_000)));
+    }
+
+    #[test]
+    fn bar_style_needs_two_samples_for_a_sparkline() {
+        let cpu = cpu_row(30.0);
+        assert_eq!(bar_style(&cpu, &[]), BarStyle::Level);
+        assert_eq!(bar_style(&cpu, &[0.3]), BarStyle::Level);
+        assert_eq!(bar_style(&cpu, &[0.2, 0.3]), BarStyle::Spark);
+        let info = BatteryInfo {
+            present: true,
+            ac_online: false,
+            charging: false,
+            percent: 72,
+            secs_left: None,
+        };
+        assert_eq!(bar_style(&battery_row(&info), &[0.72; 64]), BarStyle::Level);
+        assert_eq!(bar_style(&uptime_row(3_600_000), &[]), BarStyle::None);
+    }
+
+    /// A bar track 184 x 8 px, the widget's size at 96 dpi and font 13.
+    const TRACK: RECT = RECT { left: 8, top: 50, right: 192, bottom: 58 };
+
+    fn xy(points: &[POINT]) -> Vec<(i32, i32)> {
+        points.iter().map(|p| (p.x, p.y)).collect()
+    }
+
+    #[test]
+    fn spark_line_stays_inside_track() {
+        // x runs over [left, right - 1] and y over [top, bottom - 1]; the stub
+        // ends on `right`, the end point GDI leaves out.
+        let line = spark_line(&TRACK, &[0.0, 1.0, 0.5]);
+        assert_eq!(xy(&line), [(8, 57), (99, 50), (191, 53), (192, 53)]);
+    }
+
+    #[test]
+    fn spark_line_single_sample_stays_inside() {
+        for v in [0.0, 0.5, 1.0] {
+            let line = spark_line(&TRACK, &[v]);
+            assert!(!line.is_empty());
+            for (x, y) in xy(&line) {
+                assert!((8..=192).contains(&x) && (50..=57).contains(&y), "{v}: ({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn spark_area_closes_on_track_bottom() {
+        let line = spark_line(&TRACK, &[0.0, 1.0, 0.5]);
+        let area = spark_area(&TRACK, &line);
+        assert_eq!(xy(&area[..line.len()]), xy(&line));
+        assert_eq!(xy(&area[line.len()..]), [(192, 58), (8, 58)]);
     }
 }
