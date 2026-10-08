@@ -112,15 +112,14 @@ fn vram_total(uma: bool, dedicated: u64, shared_system: u64) -> u64 {
 }
 
 /// Memory in use by the same rule: dedicated usage for a discrete adapter,
-/// dedicated + shared usage for a UMA one (`None` only when both are unknown).
+/// dedicated + shared usage for a UMA one. Shared usage is almost all of a UMA
+/// adapter's figure, so without it the reading is `None`, not a misleading 0;
+/// an unknown dedicated part counts as 0.
 fn vram_used(uma: bool, dedicated: Option<u64>, shared: Option<u64>) -> Option<u64> {
     if !uma {
         return dedicated;
     }
-    match (dedicated, shared) {
-        (None, None) => None,
-        (d, s) => Some(d.unwrap_or(0).saturating_add(s.unwrap_or(0))),
-    }
+    Some(dedicated.unwrap_or(0).saturating_add(shared?))
 }
 
 /// Bytes one adapter uses: the sum of its "luid_..._phys_N" instances of a
@@ -531,6 +530,15 @@ mod tests {
         assert_eq!(vram_row("GPU Mem", used, total).value, "0.8/8G");
         assert_eq!(vram_used(true, None, Some(5)), Some(5));
         assert_eq!(vram_used(true, None, None), None);
+    }
+
+    #[test]
+    fn integrated_vram_without_shared_usage_is_na() {
+        // A UMA tick whose Shared Usage read failed: the dedicated part alone (0 on
+        // the UHD 730) would show a real-looking "0.0/8G", so the usage is unknown.
+        let total = vram_total(true, 128 * MIB, 8027 * MIB);
+        assert_eq!(vram_row("GPU Mem", vram_used(true, Some(0), None), total).value, "n/a");
+        assert_eq!(vram_used(true, Some(64 * MIB), None), None);
     }
 
     #[test]
