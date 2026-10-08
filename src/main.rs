@@ -157,6 +157,10 @@ struct AppState {
     /// The row count the window was last sized for, rows the work-area cap
     /// leaves out included (place_widget, relayout).
     sized_rows: usize,
+    /// True until the first sampling tick after startup, which puts the
+    /// widget at home for its row count instead of resizing it from a corner
+    /// (tick_layout), so home cannot move from one launch to the next.
+    startup_layout_pending: bool,
     // Cached off-screen back buffer for double buffering; recreated on resize.
     back_dc: HDC,
     back_bmp: HBITMAP,
@@ -290,6 +294,34 @@ unsafe fn sync_layout(hwnd: HWND, n: usize, force: bool) -> bool {
     relayout(hwnd, None, true, true)
 }
 
+/// What a sampling tick does about the widget's size (tick_layout).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum TickLayout {
+    /// Nothing: the size fits the row count, or a drag is in progress.
+    Keep,
+    /// Put the widget at home at its new size (place_widget); home stays.
+    Place,
+    /// Resize it from its nearest corner, home following (sync_layout).
+    Sync,
+}
+
+/// What a tick that counted `n` rows does to a widget sized for `sized` rows.
+/// At startup the widget was sized for the priming sample, which can count
+/// other rows than the ticks (per-core CPU often reads few or no cores, and
+/// temperatures can too). Resizing it from its nearest corner would keep a
+/// lower-half widget's bottom edge and make its new top-left home, so home
+/// would move at every launch: the first tick after startup (`startup`)
+/// puts it at home instead. Later ticks resize as layout_dirty says.
+fn tick_layout(startup: bool, sized: usize, n: usize, in_move: bool) -> TickLayout {
+    if !layout_dirty(sized, n, in_move, false) {
+        TickLayout::Keep
+    } else if startup {
+        TickLayout::Place
+    } else {
+        TickLayout::Sync
+    }
+}
+
 /// The period of the first tick after the sources are built (at startup and on
 /// a metric Apply): at most a second, so the pending marker shows only briefly.
 /// That tick re-arms the timer at the configured interval.
@@ -376,6 +408,7 @@ fn main() -> Result<()> {
             in_move: false,
             move_start: (0, 0),
             sized_rows: tmp.len(),
+            startup_layout_pending: true,
             back_dc: HDC(core::ptr::null_mut()),
             back_bmp: HBITMAP(core::ptr::null_mut()),
             back_prev: HGDIOBJ(core::ptr::null_mut()),
@@ -541,7 +574,7 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER if wparam.0 == TIMER_ID => {
             let p = state_ptr(hwnd);
             if !p.is_null() {
-                let n = {
+                let (n, layout) = {
                     let st = &mut *p;
                     for s in st.sources.iter_mut() {
                         s.sample();
@@ -556,15 +589,24 @@ unsafe extern "system" fn wnd_proc(
                     }
                     let (rows, keys) = collect_rows(&st.sources, false);
                     st.history.record(&row_ids(&keys, &rows), &rows);
-                    rows.len()
+                    let n = rows.len();
+                    let startup = core::mem::take(&mut st.startup_layout_pending);
+                    (n, tick_layout(startup, st.sized_rows, n, st.in_move))
                 };
                 // A source's row count can change between ticks (temperature
                 // sensors come and go): resize after the borrow, and save home
-                // only when the resize moved it.
-                if sync_layout(hwnd, n, false) {
-                    let p = state_ptr(hwnd);
-                    if !p.is_null() {
-                        persist(&*p);
+                // only when the resize moved it. The first tick after startup
+                // puts the widget at home instead and never moves home.
+                match layout {
+                    TickLayout::Keep => {}
+                    TickLayout::Place => place_widget(hwnd),
+                    TickLayout::Sync => {
+                        if sync_layout(hwnd, n, false) {
+                            let p = state_ptr(hwnd);
+                            if !p.is_null() {
+                                persist(&*p);
+                            }
+                        }
                     }
                 }
                 let _ = InvalidateRect(Some(hwnd), None, false);
@@ -1335,6 +1377,74 @@ mod tests {
         assert!(!layout_dirty(5, 6, true, false));
         // A new font or metric order resizes even with the same row count.
         assert!(layout_dirty(5, 5, false, true));
+    }
+
+    #[test]
+    fn first_tick_after_startup_places_the_widget_at_home() {
+        // The priming sample counted 5 rows and the first tick counts 16 (or
+        // the other way round): back to home at the new size.
+        assert_eq!(tick_layout(true, 5, 16, false), TickLayout::Place);
+        assert_eq!(tick_layout(true, 16, 5, false), TickLayout::Place);
+        // Nothing to catch up, or a drag in progress: the size stays.
+        assert_eq!(tick_layout(true, 5, 5, false), TickLayout::Keep);
+        assert_eq!(tick_layout(true, 5, 16, true), TickLayout::Keep);
+    }
+
+    #[test]
+    fn later_ticks_resize_as_layout_dirty_says() {
+        assert_eq!(tick_layout(false, 5, 16, false), TickLayout::Sync);
+        assert_eq!(tick_layout(false, 16, 5, false), TickLayout::Sync);
+        assert_eq!(tick_layout(false, 5, 5, false), TickLayout::Keep);
+        assert_eq!(tick_layout(false, 5, 16, true), TickLayout::Keep);
+    }
+
+    /// One launch of a widget whose home is `home`, in the work area `wa` at
+    /// 100% and font 13, whose priming sample counts `primed` rows and whose
+    /// ticks count `steady`: WM_CREATE places it for the primed rows
+    /// (place_widget), then the first tick catches up as `first_tick` says,
+    /// with the rules place_widget and relayout apply. Returns home after
+    /// that tick, which Exit saves for the next launch.
+    fn launch(
+        home: (i32, i32),
+        wa: RECT,
+        primed: usize,
+        steady: usize,
+        first_tick: TickLayout,
+    ) -> (i32, i32) {
+        let size = |n| widget_size(Scale(96), 13, n, wa.bottom - wa.top);
+        let (w, h, _) = size(primed);
+        let ((x, y), displaced) = placement::place(home, w, h, wa);
+        match first_tick {
+            // place_widget (Place) moves the widget, never home; Keep moves
+            // neither.
+            TickLayout::Keep | TickLayout::Place => home,
+            TickLayout::Sync => {
+                let old = RECT { left: x, top: y, right: x + w, bottom: y + h };
+                let (w, h, _) = size(steady);
+                let (spot, clamped) = placement::anchored(old, w, h, wa);
+                let (new_home, _) =
+                    placement::after_relayout(Some(home), spot, clamped, displaced, false, true);
+                new_home.unwrap_or(home)
+            }
+        }
+    }
+
+    #[test]
+    fn rows_found_after_priming_do_not_move_home_across_launches() {
+        // Home in the lower half of the primary work area, 70% down; the
+        // priming sample counts two rows fewer than the ticks.
+        let wa = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let home = (1696, 756);
+        // Resized from its nearest corner, the widget keeps its bottom edge
+        // and its new top-left becomes home: two rows (72 px) up per launch.
+        let once = launch(home, wa, 4, 6, TickLayout::Sync);
+        assert_eq!(once, (1696, 684));
+        assert_eq!(launch(once, wa, 4, 6, TickLayout::Sync), (1696, 612));
+        // The first tick after startup puts the widget at home instead.
+        let first = tick_layout(true, 4, 6, false);
+        let once = launch(home, wa, 4, 6, first);
+        assert_eq!(once, home);
+        assert_eq!(launch(once, wa, 4, 6, first), home);
     }
 
     /// How many times a run of left-button tray callbacks toggles the widget,
