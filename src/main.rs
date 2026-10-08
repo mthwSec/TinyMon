@@ -43,9 +43,8 @@ use windows::core::{w, Error, Result, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontIndirectW,
-    CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, GetMonitorInfoW, InvalidateRect,
-    MonitorFromWindow, SelectObject, UpdateWindow, CLEARTYPE_QUALITY, HBITMAP, HDC, HFONT, HGDIOBJ,
-    LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, SRCCOPY,
+    CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, InvalidateRect, SelectObject, UpdateWindow,
+    CLEARTYPE_QUALITY, HBITMAP, HDC, HFONT, HGDIOBJ, LOGFONTW, PAINTSTRUCT, SRCCOPY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
@@ -54,16 +53,17 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
     DestroyWindow, DispatchMessageW, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
-    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IsDialogMessageW, IsWindow,
-    KillTimer, LoadCursorW, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW,
-    SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, TrackPopupMenu, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GA_ROOT,
+    GetMessageW, GetWindowLongPtrW, GetWindowRect, IsDialogMessageW, IsWindow, KillTimer,
+    LoadCursorW, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    TrackPopupMenu, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GA_ROOT,
     GWLP_USERDATA, GWL_EXSTYLE, HICON, HTCAPTION, IDC_ARROW, LWA_ALPHA, MB_ICONWARNING, MB_OK,
-    MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, SM_CXSCREEN, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE,
-    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_HOTKEY, WM_KEYDOWN,
-    WM_LBUTTONUP, WM_NCHITTEST, WM_NCRBUTTONUP, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_TIMER,
-    WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, SPI_SETWORKAREA, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP,
+    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
+    WM_EXITSIZEMOVE, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONUP, WM_NCHITTEST, WM_NCRBUTTONUP, WM_NULL,
+    WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, VK_ESCAPE, VK_RETURN, VK_TAB};
@@ -75,7 +75,7 @@ use render::{render_rows, win_w, window_height, BG_COLOR, LIGHT, THEME};
 use settings::Settings;
 
 // ---- Layout ----------------------------------------------------------------
-const MARGIN: i32 = 24; // gap from the screen edge for the default position
+const MARGIN: i32 = 24; // gap from the work area's edges for the first-run spot and snaps
 
 // ---- Misc ------------------------------------------------------------------
 const TIMER_ID: usize = 1;
@@ -113,6 +113,8 @@ struct AppState {
     /// (`MetricKey::is_delta`) show `registry::PENDING` meanwhile, since their
     /// primed values cover only the moment since their baseline.
     first_tick_pending: bool,
+    /// `settings.pos` is the widget's home, the spot the user chose: a drag or
+    /// Move to corner sets it; a move made only to fit a work area does not.
     settings: Settings,
     font: HFONT,
     /// Current monitor DPI (96 = 100%); drives all layout scaling.
@@ -124,6 +126,15 @@ struct AppState {
     /// Click-through "lock": when on, the widget ignores the mouse (WS_EX_TRANSPARENT)
     /// so it never blocks clicks; toggled from the tray (runtime-only).
     locked: bool,
+    /// True while the widget sits away from its home because home does not fit
+    /// the work area there (the widget was fitted inside instead). A drag or
+    /// Move to corner, which sets home, clears it.
+    displaced: bool,
+    /// True from WM_ENTERSIZEMOVE to WM_EXITSIZEMOVE: the user is dragging the
+    /// widget (or clicking it, which runs the same move loop).
+    in_move: bool,
+    /// The widget's top-left when that move loop started.
+    move_start: (i32, i32),
     // Cached off-screen back buffer for double buffering; recreated on resize.
     back_dc: HDC,
     back_bmp: HBITMAP,
@@ -144,6 +155,40 @@ fn fitted_size(st: &AppState) -> (i32, i32) {
     }
     let w = win_w(scale, st.settings.font_px);
     (w, window_height(scale, tmp.len() as i32, st.settings.font_px))
+}
+
+/// Put the widget, sized for its current rows, at its home, or as close to it
+/// as the work area nearest to home allows (home is kept, so the widget goes
+/// back once home fits again). With no home yet (the first run), the top-right
+/// corner of the primary work area becomes home and is saved. SetWindowPos
+/// sends messages to the widget, so it runs after the borrow ends.
+unsafe fn place_widget(hwnd: HWND) {
+    let p = state_ptr(hwnd);
+    if p.is_null() {
+        return;
+    }
+    let (x, y, w, h) = {
+        let st = &mut *p;
+        let (w, h) = fitted_size(st);
+        let ((x, y), displaced) = match st.settings.pos {
+            Some((hx, hy)) => {
+                let (right, bottom) = (hx.saturating_add(w), hy.saturating_add(h));
+                let near = placement::work_area_near(&RECT { left: hx, top: hy, right, bottom });
+                placement::place((hx, hy), w, h, near)
+            }
+            None => {
+                // The first run: the top-right corner of the primary work area.
+                let wa = placement::primary_work_area();
+                let home = placement::corner_xy(1, w, h, wa, Scale(st.dpi).px(MARGIN));
+                st.settings.pos = Some(home);
+                persist(st);
+                (home, false)
+            }
+        };
+        st.displaced = displaced;
+        (x, y, w, h)
+    };
+    let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 /// Resize the widget, keeping its position. SetWindowPos sends messages to the
@@ -208,16 +253,16 @@ fn main() -> Result<()> {
             s.sample();
         }
 
-        // Size the window from the actual current row count.
+        // A provisional rect: home (or (0, 0) on the first run), sized for the
+        // current rows at the system DPI. WM_CREATE's place_widget moves it
+        // home, or on-screen, before the window is first shown.
         let mut tmp: Vec<Row> = Vec::new();
         for s in &sources {
             s.rows(&mut tmp);
         }
         let win_h = window_height(scale, tmp.len() as i32, settings.font_px);
         let win_width = win_w(scale, settings.font_px);
-        let (x, y) = settings
-            .pos
-            .unwrap_or_else(|| (GetSystemMetrics(SM_CXSCREEN) - win_width - MARGIN, MARGIN));
+        let (x, y) = settings.pos.unwrap_or((0, 0));
 
         let state = Box::new(AppState {
             sources,
@@ -230,6 +275,9 @@ fn main() -> Result<()> {
             icon_sm,
             visible: true,
             locked: false,
+            displaced: false,
+            in_move: false,
+            move_start: (0, 0),
             back_dc: HDC(core::ptr::null_mut()),
             back_bmp: HBITMAP(core::ptr::null_mut()),
             back_prev: HGDIOBJ(core::ptr::null_mut()),
@@ -332,7 +380,8 @@ unsafe extern "system" fn wnd_proc(
 ) -> LRESULT {
     match msg {
         // Stash the Box<AppState> pointer, start the timer (its first tick
-        // within a second, see first_tick_ms), add the tray icon.
+        // within a second, see first_tick_ms), place the window, add the tray
+        // icon.
         WM_CREATE => {
             let cs = lparam.0 as *const CREATESTRUCTW;
             if !cs.is_null() {
@@ -348,7 +397,8 @@ unsafe extern "system" fn wnd_proc(
                     (*p).settings.hotkey_toggle,
                     (*p).settings.hotkey_settings,
                 );
-                // Reconcile DPI if the window opened on a non-system-DPI monitor.
+                // Reconcile DPI if the window opened on a non-system-DPI monitor
+                // (place_widget below sizes the window for it).
                 let st = &mut *p;
                 let real = dpi::dpi_for_window(hwnd);
                 if real != st.dpi {
@@ -356,9 +406,11 @@ unsafe extern "system" fn wnd_proc(
                     let nf = create_mono_font(Scale(real), st.settings.font_px);
                     let _ = DeleteObject(HGDIOBJ(st.font.0));
                     st.font = nf;
-                    apply_window_size(hwnd, fitted_size(st));
                 }
             }
+            // Before the first show: from the provisional rect to home, or as
+            // close to it as the screen allows.
+            place_widget(hwnd);
             add_tray_icon(hwnd);
             LRESULT(0)
         }
@@ -461,12 +513,46 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
 
-        // Persist the window position after a drag finishes.
+        // A drag starts (a click runs the same move loop): note where from.
+        WM_ENTERSIZEMOVE => {
+            let p = state_ptr(hwnd);
+            let mut r = RECT::default();
+            if !p.is_null() && GetWindowRect(hwnd, &mut r).is_ok() {
+                (*p).in_move = true;
+                (*p).move_start = (r.left, r.top);
+            }
+            LRESULT(0)
+        }
+
+        // The drag ended: only a real move becomes home (and is saved), so a
+        // click on a widget that sits away from home (to focus it for Esc)
+        // keeps home. With no drag in progress (a stray post) nothing changes.
         WM_EXITSIZEMOVE => {
             let p = state_ptr(hwnd);
-            if !p.is_null() {
-                persist(hwnd, &mut *p);
+            let mut r = RECT::default();
+            if !p.is_null()
+                && core::mem::take(&mut (*p).in_move)
+                && GetWindowRect(hwnd, &mut r).is_ok()
+            {
+                let st = &mut *p;
+                if let Some(home) = placement::drag_end(st.move_start, (r.left, r.top)) {
+                    st.settings.pos = Some(home);
+                    st.displaced = false;
+                    persist(st);
+                }
             }
+            LRESULT(0)
+        }
+
+        // The monitors or the resolution changed, or the work area did (the
+        // taskbar moved, resized, auto-hid or re-docked): back home, or as
+        // close to it as now fits.
+        WM_DISPLAYCHANGE => {
+            place_widget(hwnd);
+            LRESULT(0)
+        }
+        WM_SETTINGCHANGE if wparam.0 == SPI_SETWORKAREA.0 as usize => {
+            place_widget(hwnd);
             LRESULT(0)
         }
 
@@ -561,7 +647,7 @@ unsafe extern "system" fn wnd_proc(
                 if !sh.0.is_null() && IsWindow(Some(sh)).as_bool() {
                     let _ = DestroyWindow(sh);
                 }
-                persist(hwnd, &mut *p);
+                persist(&*p);
                 let mut st = Box::from_raw(p); // reclaim; sources drop (PDH queries close)
                 destroy_back_buffer(&mut st);
                 let _ = DeleteObject(HGDIOBJ(st.font.0));
@@ -710,7 +796,7 @@ unsafe fn toggle_theme(hwnd: HWND) {
     let st = &mut *p;
     st.settings.light = !st.settings.light;
     let _ = InvalidateRect(Some(hwnd), None, false);
-    persist(hwnd, st);
+    persist(st);
 }
 
 /// Toggle click-through "lock": when on, `WS_EX_TRANSPARENT` makes the widget
@@ -733,47 +819,36 @@ unsafe fn toggle_lock(hwnd: HWND) {
 }
 
 /// Move the widget to a corner (0=TL, 1=TR, 2=BL, 3=BR) of its current monitor's
-/// work area with the standard margin, then persist the new position.
+/// work area with the standard margin; that spot becomes home and is saved.
 unsafe fn snap_to_corner(hwnd: HWND, corner: usize) {
-    let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-    let mut mi =
-        MONITORINFO { cbSize: core::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-    if !GetMonitorInfoW(mon, &mut mi).as_bool() {
-        return;
-    }
-    let wa = mi.rcWork;
+    let p = state_ptr(hwnd);
     let mut wr = RECT::default();
-    if GetWindowRect(hwnd, &mut wr).is_err() {
+    if p.is_null() || GetWindowRect(hwnd, &mut wr).is_err() {
         return;
     }
     let (w, h) = (wr.right - wr.left, wr.bottom - wr.top);
-    let p = state_ptr(hwnd);
-    let dpi = if p.is_null() { 96 } else { (*p).dpi };
-    let m = Scale(dpi).px(MARGIN);
-    let (x, y) = match corner {
-        0 => (wa.left + m, wa.top + m),
-        1 => (wa.right - w - m, wa.top + m),
-        2 => (wa.left + m, wa.bottom - h - m),
-        _ => (wa.right - w - m, wa.bottom - h - m),
+    let (x, y) = {
+        let st = &mut *p;
+        let m = Scale(st.dpi).px(MARGIN);
+        let home = placement::corner_xy(corner, w, h, placement::work_area_near(&wr), m);
+        st.settings.pos = Some(home);
+        st.displaced = false;
+        persist(st);
+        home
     };
     let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    if !p.is_null() {
-        persist(hwnd, &mut *p);
-    }
 }
 
 // ---- Config ----------------------------------------------------------------
 
-/// Persist the full config (position + settings) — the single writer, so saving
-/// position never clobbers metric settings and vice-versa.
-unsafe fn persist(hwnd: HWND, st: &mut AppState) {
-    let Some(path) = st.cfg_path.clone() else { return };
-    let mut rect = RECT::default();
-    if GetWindowRect(hwnd, &mut rect).is_ok() {
-        st.settings.pos = Some((rect.left, rect.top));
-    }
+/// Save the settings as they are, home included: the single writer, so saving
+/// home never clobbers metric settings and vice versa. It never reads the
+/// window's rect, so a spot the widget was moved to only to fit a work area
+/// cannot replace home.
+fn persist(st: &AppState) {
+    let Some(path) = st.cfg_path.as_deref() else { return };
     // Best-effort: the result is ignored, so a failed save is not reported.
-    let _ = config::write(&path, &st.settings.to_config());
+    let _ = config::write(path, &st.settings.to_config());
 }
 
 /// Open the settings window (single-instance: focus it if already open).
@@ -833,7 +908,7 @@ unsafe fn apply_settings(hwnd: HWND, new: Settings) -> Option<String> {
     }
     let (size, toggle, settings, res) = {
         let st = &mut *p;
-        // The settings window never moves the widget: keep its position.
+        // The settings window never moves the widget: keep its home.
         let pos = st.settings.pos;
         let old = core::mem::replace(&mut st.settings, Settings { pos, ..new });
         if st.settings.opacity != old.opacity {
@@ -879,7 +954,7 @@ unsafe fn apply_settings(hwnd: HWND, new: Settings) -> Option<String> {
     }
     let p = state_ptr(hwnd);
     if !p.is_null() {
-        persist(hwnd, &mut *p);
+        persist(&*p);
     }
     let _ = InvalidateRect(Some(hwnd), None, false);
     res.and_then(|r| hotkeys::conflict_message(toggle, settings, &r))
