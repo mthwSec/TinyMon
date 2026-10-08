@@ -105,7 +105,7 @@ pub fn window_height(scale: Scale, n_rows: i32, font_px: i32) -> i32 {
 /// Render `rows` into a `w`×`h` device-pixel surface using `font`/`scale`/`theme`.
 /// Pure view: no `AppState`, no sampling — the widget and the settings preview
 /// both call this, so they stay pixel-for-pixel consistent.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub unsafe fn render_rows(
     hdc: HDC,
     w: i32,
@@ -173,7 +173,7 @@ pub fn is_critical(row: &Row) -> bool {
 
 /// Draw one row: accent-colored label (left, ellipsized) + value (right) sharing
 /// a uniform value column, then an optional load-colored bar.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 unsafe fn draw_row(
     hdc: HDC,
     width: i32,
