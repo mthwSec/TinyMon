@@ -388,8 +388,13 @@ mod tests {
     #[test]
     fn throughput_rows_never_alert() {
         // Both bars are full (1.0) with no bar_color: the old predicate said true.
-        assert!(!is_critical(&disk_row("Disk R", Some(500.0 * 1024.0 * 1024.0))));
-        assert!(!is_critical(&net_row("Net\u{2193}", Some(50e6))));
+        let disk = disk_row("Disk R", Some(500.0 * 1024.0 * 1024.0));
+        let net = net_row("Net\u{2193}", Some(50e6));
+        for row in [&disk, &net] {
+            // The premise: without a full bar this test would prove nothing.
+            assert_eq!((row.bar, row.bar_color), (Some(1.0), None), "{}", row.label);
+            assert!(!is_critical(row));
+        }
     }
 
     #[test]

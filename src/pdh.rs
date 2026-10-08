@@ -146,4 +146,13 @@ mod tests {
         let c = PdhCounter::new(w!("\\Memory\\Available Bytes"));
         assert_eq!(c.try_sample().map(|s| s.len()), Some(1));
     }
+
+    #[test]
+    fn no_instance_is_an_empty_sample_not_a_failure() {
+        // A single instance that does not exist: the add succeeds, and every collect
+        // reports PDH_NO_DATA, which is "no instance reported", not a failed read.
+        let c = PdhCounter::new(w!("\\Processor(9999)\\% Processor Time"));
+        assert_eq!(c.try_sample(), Some(Vec::new()));
+        assert_eq!(c.try_sample(), Some(Vec::new()));
+    }
 }

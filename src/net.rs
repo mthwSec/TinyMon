@@ -179,6 +179,15 @@ mod tests {
     }
 
     #[test]
+    fn filter_rows_never_count_even_as_hardware() {
+        // A filter module can carry the hardware bit too; it never counts, in the
+        // hardware pass either, so a NIC is not counted once per filter module.
+        let row = |flags: u8, luid: u64| (flags, (luid, 0, 0));
+        assert_eq!(pick_nics(&[row(0b011, 9)]), None);
+        assert_eq!(pick_nics(&[row(0b111, 9), row(0b101, 10)]), Some(vec![(10, 0, 0)]));
+    }
+
+    #[test]
     fn delta_sums_interfaces_seen_twice() {
         let prev = [(1, 100, 50), (2, 1000, 10)];
         let cur = [(1, 150, 80), (2, 1500, 10)];

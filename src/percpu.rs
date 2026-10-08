@@ -101,6 +101,31 @@ mod tests {
     }
 
     #[test]
+    fn empty_sample_keeps_cores_as_na() {
+        // PDH_NO_DATA (Some(empty)) reads no core, like a failed sample.
+        let prev = [(0, Some(12.0)), (1, Some(34.0))];
+        assert_eq!(next_cores(&prev, Some(Vec::new())), [(0, None), (1, None)]);
+    }
+
+    #[test]
+    fn cores_recover_after_an_na_tick() {
+        let na = [(0, None), (1, None)];
+        let sample = vec![("1".to_string(), 7.0), ("0".to_string(), 5.0)];
+        assert_eq!(next_cores(&na, Some(sample)), [(0, Some(5.0)), (1, Some(7.0))]);
+    }
+
+    #[test]
+    fn partial_sample_replaces_the_cores() {
+        // A sample that lacks some cores (try_sample drops an instance with an
+        // invalid status) replaces the list instead of being merged into it, so
+        // the row count follows the sample; only a sample with no numbered core
+        // keeps the known cores.
+        let prev = [(0, Some(12.0)), (1, Some(34.0))];
+        let sample = vec![("1".to_string(), 3.0)];
+        assert_eq!(next_cores(&prev, Some(sample)), [(1, Some(3.0))]);
+    }
+
+    #[test]
     fn no_cores_shows_one_na_row() {
         let mut out = Vec::new();
         core_rows(&next_cores(&[], None), &mut out);

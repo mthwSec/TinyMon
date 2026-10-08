@@ -435,6 +435,19 @@ mod tests {
     }
 
     #[test]
+    fn load_rows_gives_one_row_per_adapter() {
+        // With adapters there is no extra "GPU n/a" row, even when a load is unknown.
+        let gpus = [
+            GpuAdapter { name: "Intel UHD 730".into(), ..adapter(Some(40.0)) },
+            GpuAdapter { name: "RTX 3050".into(), ..adapter(None) },
+        ];
+        let mut out = Vec::new();
+        load_rows(&gpus, &mut out);
+        let got: Vec<_> = out.iter().map(|r| (r.label.as_str(), r.value.as_str(), r.bar)).collect();
+        assert_eq!(got, [("Intel UHD 730", "40%", Some(0.4)), ("RTX 3050", "n/a", None)]);
+    }
+
+    #[test]
     fn unreadable_load_counter_shows_na() {
         let mut gpus = [adapter(Some(40.0)), adapter(Some(60.0))];
         let sampler = GpuLoadSampler { counter: PdhCounter::new(w!("\\No Such Object(*)\\X")) };
@@ -465,6 +478,15 @@ mod tests {
     #[test]
     fn vram_unavailable_is_na() {
         let r = vram_row("VRAM", None, 16 * GIB);
+        assert_eq!(r.value, "n/a");
+        assert_eq!(r.bar, None);
+    }
+
+    #[test]
+    fn vram_row_without_a_total_is_na() {
+        // A total of 0 (an adapter classed discrete that reports no dedicated
+        // memory): n/a, not "0/0M" over a full bar.
+        let r = vram_row("VRAM", Some(5), 0);
         assert_eq!(r.value, "n/a");
         assert_eq!(r.bar, None);
     }
@@ -587,6 +609,22 @@ mod tests {
     }
 
     #[test]
+    fn raw_pdh_names_match_once_lowercased() {
+        // Raw PDH instance names spell the LUID in uppercase hex ("0x000109F8",
+        // "engtype_3D"); PdhCounter lowercases them, and LUID matching relies on it.
+        let read = |raw: &str| {
+            let mut buf: Vec<u16> = raw.encode_utf16().chain([0]).collect();
+            // SAFETY: a NUL-terminated buffer that outlives the call.
+            unsafe { crate::pdh::pwstr_to_string(windows::core::PWSTR(buf.as_mut_ptr())) }
+        };
+        let key = luid_key(0, 0x109f8);
+        let engine = read("pid_968_luid_0x00000000_0x000109F8_phys_0_eng_0_engtype_3D");
+        assert_eq!(busiest_engine(&[(engine, 42.0)], Some(&key)), Some(42.0));
+        let memory = read("luid_0x00000000_0x000109F8_phys_0");
+        assert_eq!(adapter_bytes(&[(memory, 793.0)], &key), Some(793));
+    }
+
+    #[test]
     fn engine_key_strips_pid_and_engtype() {
         assert_eq!(
             engine_key("pid_10680_luid_0x00000000_0x000109f8_phys_0_eng_0_engtype_3d"),
@@ -601,6 +639,16 @@ mod tests {
             engine_key("pid_968_luid_0x00000000_0x000109f8_phys_0_eng_5_engtype_gdi render"),
             "luid_0x00000000_0x000109f8_phys_0_eng_5"
         );
+    }
+
+    #[test]
+    fn engine_key_keeps_odd_names_whole() {
+        // Without "luid_" the key starts at the beginning of the name.
+        assert_eq!(engine_key("pid_1_eng_0_engtype_3d"), "pid_1_eng_0");
+        assert_eq!(engine_key("pid_1_eng_0"), "pid_1_eng_0");
+        // "_engtype_" before "luid_" gives no valid range: the whole name is the
+        // key, and the lookup never panics (release builds abort on a panic).
+        assert_eq!(engine_key("x_engtype_3d_luid_y"), "x_engtype_3d_luid_y");
     }
 
     #[test]
