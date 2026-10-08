@@ -8,7 +8,8 @@ use crate::registry::Row;
 
 pub struct PerCpuSampler {
     counter: PdhCounter,
-    /// (core index, load %), sorted by index; `None` = this tick's reading failed.
+    /// (core index, load %), sorted by index; `None` = no reading for that core
+    /// this tick.
     cores: Vec<(usize, Option<f64>)>,
 }
 
@@ -29,10 +30,12 @@ impl PerCpuSampler {
     }
 }
 
-/// The cores of a fresh sample, sorted by index. Instance names are "0".."N-1"
-/// plus "_total"; only the numbered ones count. When no numbered core comes
-/// back (a failed or empty sample, or `_total` only), the known cores are kept
-/// without a value, so the row count stays stable.
+/// The known cores and those of a fresh sample, sorted by index. Instance
+/// names are "0".."N-1" plus "_total"; only the numbered ones count. A core
+/// the sample returns carries its value, and one never seen before is added; a
+/// known core it lacks (a failed or empty sample, `_total` only, or an
+/// instance dropped for its status) is kept without a value, so the row count
+/// stays stable.
 fn next_cores(
     prev: &[(usize, Option<f64>)],
     sample: Option<Vec<(String, f64)>>,
@@ -42,8 +45,10 @@ fn next_cores(
         .into_iter()
         .filter_map(|(name, v)| name.parse::<usize>().ok().map(|i| (i, Some(v))))
         .collect();
-    if cores.is_empty() {
-        return prev.iter().map(|&(i, _)| (i, None)).collect();
+    for &(i, _) in prev {
+        if !cores.iter().any(|&(c, _)| c == i) {
+            cores.push((i, None));
+        }
     }
     cores.sort_by_key(|(i, _)| *i);
     cores
@@ -115,14 +120,28 @@ mod tests {
     }
 
     #[test]
-    fn partial_sample_replaces_the_cores() {
-        // A sample that lacks some cores (try_sample drops an instance with an
-        // invalid status) replaces the list instead of being merged into it, so
-        // the row count follows the sample; only a sample with no numbered core
-        // keeps the known cores.
+    fn partial_sample_keeps_known_cores_as_na() {
+        // A sample that lacks some known cores (try_sample drops an instance
+        // with an invalid status) keeps them without a value, in index order,
+        // so the row count stays stable: the widget does not resize and the
+        // missing core's sparkline pauses instead of restarting.
         let prev = [(0, Some(12.0)), (1, Some(34.0))];
-        let sample = vec![("1".to_string(), 3.0)];
-        assert_eq!(next_cores(&prev, Some(sample)), [(1, Some(3.0))]);
+        let sample = vec![("1".to_string(), 50.0)];
+        let cores = next_cores(&prev, Some(sample));
+        assert_eq!(cores, [(0, None), (1, Some(50.0))]);
+        let mut out = Vec::new();
+        core_rows(&cores, &mut out);
+        let got: Vec<_> = out.iter().map(|r| (r.label.as_str(), r.value.as_str(), r.bar)).collect();
+        assert_eq!(got, [("C0", "n/a", None), ("C1", "50%", Some(0.5))]);
+    }
+
+    #[test]
+    fn new_core_index_is_added_in_order() {
+        // A core index never seen before (one the earlier samples lacked) joins
+        // the list in index order, next to a known core this sample lacks.
+        let prev = [(0, Some(12.0)), (2, Some(34.0))];
+        let sample = vec![("1".to_string(), 5.0), ("0".to_string(), 7.0)];
+        assert_eq!(next_cores(&prev, Some(sample)), [(0, Some(7.0)), (1, Some(5.0)), (2, None)]);
     }
 
     #[test]
