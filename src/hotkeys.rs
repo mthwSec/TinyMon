@@ -138,6 +138,33 @@ pub unsafe fn unregister(hwnd: HWND) {
     let _ = UnregisterHotKey(Some(hwnd), HK_SETTINGS);
 }
 
+/// The warning shown after an Apply: one line for each configured hotkey that
+/// failed to register (almost always because another app owns the combo), or
+/// `None` when there is nothing to list.
+pub fn conflict_message(
+    toggle: Option<HotkeySpec>,
+    settings: Option<HotkeySpec>,
+    res: &RegisterResult,
+) -> Option<String> {
+    let mut lines = String::new();
+    if res.toggle_failed {
+        if let Some(h) = toggle {
+            lines.push_str(&format!("\u{2022} Show / Hide: {}\n", format_hotkey(h)));
+        }
+    }
+    if res.settings_failed {
+        if let Some(h) = settings {
+            lines.push_str(&format!("\u{2022} Open settings: {}\n", format_hotkey(h)));
+        }
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "These hotkeys couldn't be registered (already in use by another app):\n\n{lines}\nPick a different combination in Settings."
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +244,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn conflict_message_lists_only_failed_hotkeys() {
+        let toggle = parse_hotkey("ctrl+alt+m");
+        let settings = parse_hotkey("ctrl+alt+s");
+        assert_eq!(conflict_message(toggle, settings, &RegisterResult::default()), None);
+        let toggle_failed = RegisterResult { toggle_failed: true, settings_failed: false };
+        let text = conflict_message(toggle, settings, &toggle_failed).expect("a warning");
+        assert!(text.contains("Show / Hide: Ctrl+Alt+M"), "{text}");
+        assert!(!text.contains("Open settings"), "{text}");
+        // A failed flag without a combo has nothing to list.
+        assert_eq!(conflict_message(None, settings, &toggle_failed), None);
     }
 }

@@ -32,6 +32,7 @@ mod startup;
 #[cfg(feature = "temp")]
 mod temp;
 
+use core::cell::RefCell;
 use core::ffi::c_void;
 use std::path::PathBuf;
 
@@ -91,9 +92,11 @@ const ID_SNAP_TR: usize = 7;
 const ID_SNAP_BL: usize = 8;
 const ID_SNAP_BR: usize = 9;
 const ID_THEME: usize = 10;
-/// Posted by the settings window: apply a new metric order (heap-handoff).
-pub(crate) const WM_APP_APPLY: u32 = WM_APP + 2;
-/// Posted by the settings window when it closes (clears the single-instance slot).
+/// Posted by `queue_apply` when the settings window applies. The message
+/// carries nothing (wParam is ignored): the settings wait in `PENDING_APPLY`.
+const WM_APP_APPLY: u32 = WM_APP + 2;
+/// Posted by the settings window when it closes; clears the single-instance
+/// slot once that window is gone.
 pub(crate) const WM_APP_SETTINGS_CLOSED: u32 = WM_APP + 3;
 
 /// Per-window state, owned via GWLP_USERDATA for the window's lifetime.
@@ -123,15 +126,20 @@ struct AppState {
     settings_hwnd: HWND,
 }
 
-/// Resize the widget to fit its current rows at the current DPI + font.
-unsafe fn apply_window_size(hwnd: HWND, st: &AppState) {
+/// The widget's size for its current rows at the current DPI + font.
+fn fitted_size(st: &AppState) -> (i32, i32) {
     let scale = Scale(st.dpi);
     let mut tmp: Vec<Row> = Vec::new();
     for s in &st.sources {
         s.rows(&mut tmp);
     }
     let w = win_w(scale, st.settings.font_px);
-    let h = window_height(scale, tmp.len() as i32, st.settings.font_px);
+    (w, window_height(scale, tmp.len() as i32, st.settings.font_px))
+}
+
+/// Resize the widget, keeping its position. SetWindowPos sends messages to the
+/// widget, so no AppState reference may be live across this call.
+unsafe fn apply_window_size(hwnd: HWND, (w, h): (i32, i32)) {
     let _ = SetWindowPos(hwnd, None, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
@@ -351,7 +359,7 @@ unsafe extern "system" fn wnd_proc(
                     let nf = create_mono_font(Scale(real), st.settings.font_px);
                     let _ = DeleteObject(HGDIOBJ(st.font.0));
                     st.font = nf;
-                    apply_window_size(hwnd, st);
+                    apply_window_size(hwnd, fitted_size(st));
                 }
             }
             add_tray_icon(hwnd);
@@ -397,72 +405,24 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
 
-        // Settings applied: reclaim the new Settings and apply each changed
-        // aspect (opacity / interval / font / metrics / hotkeys), then persist.
+        // Settings applied (queue_apply). They wait in PENDING_APPLY and wParam
+        // is ignored, so a foreign or repeated post finds nothing to apply. The
+        // warning box runs a nested message loop, so it is shown only after
+        // apply_settings has ended every AppState borrow.
         WM_APP_APPLY => {
-            if wparam.0 != 0 {
-                let new = *Box::from_raw(wparam.0 as *mut Settings);
-                let p = state_ptr(hwnd);
-                if !p.is_null() {
-                    let st = &mut *p;
-                    let pos = st.settings.pos;
-                    let old = st.settings.clone();
-                    st.settings = Settings { pos, ..new };
-
-                    if st.settings.opacity != old.opacity {
-                        let _ = SetLayeredWindowAttributes(
-                            hwnd,
-                            COLORREF(0),
-                            st.settings.opacity,
-                            LWA_ALPHA,
-                        );
-                    }
-                    if st.settings.interval_ms != old.interval_ms {
-                        let _ = KillTimer(Some(hwnd), TIMER_ID);
-                        SetTimer(Some(hwnd), TIMER_ID, st.settings.interval_ms, None);
-                    }
-                    let font_changed = st.settings.font_px != old.font_px;
-                    if font_changed {
-                        let nf = create_mono_font(Scale(st.dpi), st.settings.font_px);
-                        let _ = DeleteObject(HGDIOBJ(st.font.0));
-                        st.font = nf;
-                    }
-                    let order_changed = st.settings.order != old.order;
-                    if order_changed {
-                        st.sources = build_sources(&st.settings);
-                        for s in st.sources.iter_mut() {
-                            s.sample();
-                        }
-                        st.history.clear(); // rebuilt for the new row set on next tick
-                    }
-                    // The widget's size depends on both the row count (metrics)
-                    // and the font (rows + width scale with it), so resize when
-                    // either changed.
-                    if order_changed || font_changed {
-                        apply_window_size(hwnd, st);
-                    }
-                    if st.settings.hotkey_toggle != old.hotkey_toggle
-                        || st.settings.hotkey_settings != old.hotkey_settings
-                    {
-                        hotkeys::unregister(hwnd);
-                        let res = hotkeys::register(
-                            hwnd,
-                            st.settings.hotkey_toggle,
-                            st.settings.hotkey_settings,
-                        );
-                        warn_hotkey_conflicts(hwnd, st, &res);
-                    }
-                    let _ = InvalidateRect(Some(hwnd), None, false);
-                    persist(hwnd, st);
-                }
+            let Some(new) = take_pending_apply() else { return LRESULT(0) };
+            if let Some(text) = apply_settings(hwnd, new) {
+                show_warning(hwnd, &text);
             }
             LRESULT(0)
         }
 
-        // Settings window closed: clear the single-instance slot.
+        // Settings window closed: clear the single-instance slot, but only once
+        // that window is really gone. A stray post while it is open would let a
+        // second settings window open next to it, sharing its thread-local state.
         WM_APP_SETTINGS_CLOSED => {
             let p = state_ptr(hwnd);
-            if !p.is_null() {
+            if !p.is_null() && !IsWindow(Some((*p).settings_hwnd)).as_bool() {
                 (*p).settings_hwnd = HWND(core::ptr::null_mut());
             }
             LRESULT(0)
@@ -825,27 +785,102 @@ unsafe fn open_settings(hwnd: HWND) {
     }
 }
 
-/// After a user-initiated apply, warn (modal) if a configured hotkey couldn't be
-/// registered — almost always because another app already owns that combo.
-unsafe fn warn_hotkey_conflicts(hwnd: HWND, st: &AppState, res: &hotkeys::RegisterResult) {
-    let mut lines = String::new();
-    if res.toggle_failed {
-        if let Some(h) = st.settings.hotkey_toggle {
-            lines.push_str(&format!("\u{2022} Show / Hide: {}\n", hotkeys::format_hotkey(h)));
+// ---- Settings window hand-off ----------------------------------------------
+
+thread_local! {
+    /// Settings on their way from the settings window to WM_APP_APPLY. Both
+    /// windows live on the UI thread, so the message itself carries nothing,
+    /// and a foreign or repeated WM_APP_APPLY finds the slot empty.
+    static PENDING_APPLY: RefCell<Option<Settings>> = const { RefCell::new(None) };
+}
+
+/// Put `new` in the hand-off slot, replacing settings not yet applied.
+fn stash_apply(new: Settings) {
+    PENDING_APPLY.with(|p| *p.borrow_mut() = Some(new));
+}
+
+/// Take the settings waiting for WM_APP_APPLY; each stash is taken only once.
+fn take_pending_apply() -> Option<Settings> {
+    PENDING_APPLY.with(|p| p.borrow_mut().take())
+}
+
+/// Hand `new` to the widget `main`: stash it, then post a bare WM_APP_APPLY.
+/// Returns whether the post went out; if it failed, the slot is emptied again,
+/// so a later stray WM_APP_APPLY cannot apply settings whose hand-off failed.
+pub(crate) unsafe fn queue_apply(main: HWND, new: Settings) -> bool {
+    stash_apply(new);
+    let posted = PostMessageW(Some(main), WM_APP_APPLY, WPARAM(0), LPARAM(0)).is_ok();
+    if !posted {
+        take_pending_apply();
+    }
+    posted
+}
+
+/// Apply new settings in a fixed order: every AppState change under one short
+/// borrow, then the resize after it (SetWindowPos sends messages to the widget,
+/// and no AppState reference may be live across such a call), then persist,
+/// last, so the saved position is the one after the resize. Returns the hotkey
+/// warning, which the caller shows with no AppState reference live.
+unsafe fn apply_settings(hwnd: HWND, new: Settings) -> Option<String> {
+    let p = state_ptr(hwnd);
+    if p.is_null() {
+        return None;
+    }
+    let (size, toggle, settings, res) = {
+        let st = &mut *p;
+        // The settings window never moves the widget: keep its position.
+        let pos = st.settings.pos;
+        let old = core::mem::replace(&mut st.settings, Settings { pos, ..new });
+        if st.settings.opacity != old.opacity {
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), st.settings.opacity, LWA_ALPHA);
         }
-    }
-    if res.settings_failed {
-        if let Some(h) = st.settings.hotkey_settings {
-            lines.push_str(&format!("\u{2022} Open settings: {}\n", hotkeys::format_hotkey(h)));
+        if st.settings.interval_ms != old.interval_ms {
+            let _ = KillTimer(Some(hwnd), TIMER_ID);
+            SetTimer(Some(hwnd), TIMER_ID, st.settings.interval_ms, None);
         }
+        let font_changed = st.settings.font_px != old.font_px;
+        if font_changed {
+            let nf = create_mono_font(Scale(st.dpi), st.settings.font_px);
+            let _ = DeleteObject(HGDIOBJ(st.font.0));
+            st.font = nf;
+        }
+        let order_changed = st.settings.order != old.order;
+        if order_changed {
+            st.sources = build_sources(&st.settings);
+            for s in st.sources.iter_mut() {
+                s.sample();
+            }
+            st.history.clear(); // rebuilt for the new row set on next tick
+        }
+        // The widget's size depends on both the row count (metrics) and the
+        // font (rows + width scale with it): measured here, applied below.
+        let size = (order_changed || font_changed).then(|| fitted_size(st));
+        let res = if st.settings.hotkey_toggle != old.hotkey_toggle
+            || st.settings.hotkey_settings != old.hotkey_settings
+        {
+            hotkeys::unregister(hwnd);
+            Some(hotkeys::register(hwnd, st.settings.hotkey_toggle, st.settings.hotkey_settings))
+        } else {
+            None
+        };
+        (size, st.settings.hotkey_toggle, st.settings.hotkey_settings, res)
+    };
+    if let Some(size) = size {
+        apply_window_size(hwnd, size);
     }
-    if lines.is_empty() {
-        return;
+    let p = state_ptr(hwnd);
+    if !p.is_null() {
+        persist(hwnd, &mut *p);
     }
-    let body = format!(
-        "These hotkeys couldn't be registered (already in use by another app):\n\n{lines}\nPick a different combination in Settings."
-    );
-    let text: Vec<u16> = body.encode_utf16().chain(core::iter::once(0)).collect();
+    let _ = InvalidateRect(Some(hwnd), None, false);
+    res.and_then(|r| hotkeys::conflict_message(toggle, settings, &r))
+}
+
+/// Show an Apply warning (a hotkey that could not be registered) in a modal
+/// box. Its nested message loop runs wnd_proc (timer ticks, even a tray Exit
+/// that frees AppState), so it is called with no AppState reference live.
+unsafe fn show_warning(hwnd: HWND, text: &str) {
+    let text: Vec<u16> = text.encode_utf16().chain(core::iter::once(0)).collect();
     let title: Vec<u16> =
         "TinyMon \u{2014} hotkey in use".encode_utf16().chain(core::iter::once(0)).collect();
     let _ = MessageBoxW(
@@ -926,4 +961,55 @@ pub(crate) unsafe fn create_mono_font(scale: Scale, px: i32) -> HFONT {
     // SAFETY: builds a GDI font from a fully-initialized descriptor; the caller
     // owns the returned HFONT and must DeleteObject it (done in WM_DESTROY).
     CreateFontIndirectW(&lf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        PeekMessageW, HWND_MESSAGE, PM_REMOVE, WINDOW_EX_STYLE, WINDOW_STYLE,
+    };
+
+    #[test]
+    fn pending_apply_is_handed_over_once() {
+        stash_apply(Settings::defaults());
+        assert_eq!(take_pending_apply(), Some(Settings::defaults()));
+        // A second WM_APP_APPLY (a duplicate or a foreign post) finds nothing.
+        assert_eq!(take_pending_apply(), None);
+    }
+
+    /// What the hand-off test above cannot see: the message queue_apply posts
+    /// carries no pointer, and a post that fails leaves nothing in the slot for
+    /// a later stray WM_APP_APPLY to apply.
+    #[test]
+    fn queue_apply_posts_a_bare_message_or_takes_the_slot_back() {
+        // SAFETY: a message-only window of this test's thread stands in for the
+        // widget; it is destroyed before the post that must fail.
+        unsafe {
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!(""),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                None,
+                None,
+            )
+            .expect("message-only window");
+            assert!(queue_apply(hwnd, Settings::defaults()));
+            let mut msg = MSG::default();
+            let got = PeekMessageW(&mut msg, Some(hwnd), WM_APP_APPLY, WM_APP_APPLY, PM_REMOVE);
+            assert!(got.as_bool());
+            assert_eq!((msg.wParam.0, msg.lParam.0), (0, 0));
+            assert_eq!(take_pending_apply(), Some(Settings::defaults()));
+            DestroyWindow(hwnd).expect("destroy the stand-in");
+            assert!(!queue_apply(hwnd, Settings::defaults()));
+            assert_eq!(take_pending_apply(), None);
+        }
+    }
 }

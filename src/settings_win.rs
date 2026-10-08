@@ -3,9 +3,10 @@
 //!
 //! It has its own window class + wndproc and never aliases the main `AppState`.
 //! It seeds its controls from `current_settings(main)` and, on Apply/OK, builds
-//! a fresh `Settings` (clamped via `Settings::from_config`) and hands ownership
-//! to the main window through `WM_APP_APPLY`. Closing posts `WM_APP_SETTINGS_CLOSED`
-//! (it never quits the app).
+//! a fresh `Settings` (clamped via `Settings::from_config`) and hands it to the
+//! main window with `queue_apply`, which keeps it in a UI-thread slot and posts
+//! a bare `WM_APP_APPLY`. Closing posts `WM_APP_SETTINGS_CLOSED` (it never quits
+//! the app).
 //!
 //! Keyboard navigation (Tab between fields, Enter = OK, Esc = Cancel, Space to
 //! toggle a checkbox, mnemonics) is provided by `IsDialogMessageW` in the main
@@ -53,7 +54,7 @@ use crate::hotkeys::{format_hotkey, HotkeySpec};
 use crate::registry::{sample_rows, MetricKey};
 use crate::render::{render_rows, window_height, LIGHT, THEME};
 use crate::settings::{Settings, DEFAULT_FONT_PX, MAX_FONT_PX, MIN_FONT_PX};
-use crate::{create_mono_font, current_settings, WM_APP_APPLY, WM_APP_SETTINGS_CLOSED};
+use crate::{create_mono_font, current_settings, queue_apply, WM_APP_SETTINGS_CLOSED};
 
 const CLASS: PCWSTR = w!("TinyMonSettings");
 const TBM_GETPOS: u32 = 1024; // WM_USER+0 (not exposed as a named const in 0.62)
@@ -925,7 +926,8 @@ unsafe fn trackbar_customdraw(cd: &NMCUSTOMDRAW) -> LRESULT {
     LRESULT(CDRF_DODEFAULT)
 }
 
-/// Read the controls, build a clamped `Settings`, and post it to the main window.
+/// Read the controls, build a clamped `Settings`, and hand it to the main window
+/// (`queue_apply`: nothing is left behind if the post fails).
 unsafe fn apply(hwnd: HWND) {
     let main = HWND(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut c_void);
     if main.0.is_null() {
@@ -955,11 +957,7 @@ unsafe fn apply(hwnd: HWND) {
         light: Some(cur.light), // theme is toggled from the tray, not this dialog
     };
     let new = Settings::from_config(&cfg);
-
-    let boxed = Box::into_raw(Box::new(new));
-    if PostMessageW(Some(main), WM_APP_APPLY, WPARAM(boxed as usize), LPARAM(0)).is_err() {
-        drop(Box::from_raw(boxed));
-    }
+    queue_apply(main, new);
 }
 
 /// Clear a hotkey capture field (so the user can remove a binding).
