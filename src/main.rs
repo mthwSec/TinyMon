@@ -25,7 +25,6 @@ mod metrics;
 mod net;
 mod pdh;
 mod percpu;
-#[cfg_attr(not(test), expect(dead_code, reason = "tested before the widget is wired to it"))]
 mod placement;
 mod registry;
 mod render;
@@ -59,8 +58,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TrackPopupMenu, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GA_ROOT,
     GWLP_USERDATA, GWL_EXSTYLE, HICON, HTCAPTION, IDC_ARROW, LWA_ALPHA, MB_ICONWARNING, MB_OK,
     MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, SPI_SETWORKAREA, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP,
-    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
+    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE,
+    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
     WM_EXITSIZEMOVE, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONUP, WM_NCHITTEST, WM_NCRBUTTONUP, WM_NULL,
     WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
@@ -128,13 +127,16 @@ struct AppState {
     locked: bool,
     /// True while the widget sits away from its home because home does not fit
     /// the work area there (the widget was fitted inside instead). A drag or
-    /// Move to corner, which sets home, clears it.
+    /// Move to corner, which sets home, clears it; while it is set, a resize
+    /// never moves home (relayout).
     displaced: bool,
     /// True from WM_ENTERSIZEMOVE to WM_EXITSIZEMOVE: the user is dragging the
     /// widget (or clicking it, which runs the same move loop).
     in_move: bool,
     /// The widget's top-left when that move loop started.
     move_start: (i32, i32),
+    /// The row count the window was last sized for (place_widget, relayout).
+    sized_rows: usize,
     // Cached off-screen back buffer for double buffering; recreated on resize.
     back_dc: HDC,
     back_bmp: HBITMAP,
@@ -146,15 +148,16 @@ struct AppState {
     settings_hwnd: HWND,
 }
 
-/// The widget's size for its current rows at the current DPI + font.
-fn fitted_size(st: &AppState) -> (i32, i32) {
+/// The widget's size for its current rows at the current DPI + font, and the
+/// row count it is sized for.
+fn fitted_size(st: &AppState) -> (i32, i32, usize) {
     let scale = Scale(st.dpi);
     let mut tmp: Vec<Row> = Vec::new();
     for s in &st.sources {
         s.rows(&mut tmp);
     }
     let w = win_w(scale, st.settings.font_px);
-    (w, window_height(scale, tmp.len() as i32, st.settings.font_px))
+    (w, window_height(scale, tmp.len() as i32, st.settings.font_px), tmp.len())
 }
 
 /// Put the widget, sized for its current rows, at its home, or as close to it
@@ -169,7 +172,7 @@ unsafe fn place_widget(hwnd: HWND) {
     }
     let (x, y, w, h) = {
         let st = &mut *p;
-        let (w, h) = fitted_size(st);
+        let (w, h, n) = fitted_size(st);
         let ((x, y), displaced) = match st.settings.pos {
             Some((hx, hy)) => {
                 let (right, bottom) = (hx.saturating_add(w), hy.saturating_add(h));
@@ -186,15 +189,60 @@ unsafe fn place_widget(hwnd: HWND) {
             }
         };
         st.displaced = displaced;
+        st.sized_rows = n;
         (x, y, w, h)
     };
     let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-/// Resize the widget, keeping its position. SetWindowPos sends messages to the
-/// widget, so no AppState reference may be live across this call.
-unsafe fn apply_window_size(hwnd: HWND, (w, h): (i32, i32)) {
-    let _ = SetWindowPos(hwnd, None, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+/// Resize the widget for its current rows at the current DPI and font, from
+/// `from` (WM_DPICHANGED's suggested rect) or, with None, from the window's own
+/// rect. With `anchor`, the edges nearest the work area's edges stay put (a
+/// widget in a corner grows away from it) and the result is fitted into the
+/// work area; without it (during a drag) the top-left stays. Home follows the
+/// widget only as placement::after_relayout allows: never to a clamped spot,
+/// never while displaced or dragged, and never without `track_home`. Returns
+/// whether home changed. SetWindowPos sends messages to the widget, so it runs
+/// after the borrow ends.
+unsafe fn relayout(hwnd: HWND, from: Option<RECT>, anchor: bool, track_home: bool) -> bool {
+    let old = match from {
+        Some(r) => r,
+        None => {
+            let mut r = RECT::default();
+            if GetWindowRect(hwnd, &mut r).is_err() {
+                return false;
+            }
+            r
+        }
+    };
+    let p = state_ptr(hwnd);
+    if p.is_null() {
+        return false;
+    }
+    let (x, y, w, h, moved) = {
+        let st = &mut *p;
+        let (w, h, n) = fitted_size(st);
+        let (spot, clamped) = if anchor {
+            placement::anchored(old, w, h, placement::work_area_near(&old))
+        } else {
+            ((old.left, old.top), false)
+        };
+        let (home, displaced) = placement::after_relayout(
+            st.settings.pos,
+            spot,
+            clamped,
+            st.displaced,
+            st.in_move,
+            track_home,
+        );
+        let moved = home != st.settings.pos;
+        st.settings.pos = home;
+        st.displaced = displaced;
+        st.sized_rows = n;
+        (spot.0, spot.1, w, h, moved)
+    };
+    let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    moved
 }
 
 /// The period of the first tick after the sources are built (at startup and on
@@ -278,6 +326,7 @@ fn main() -> Result<()> {
             displaced: false,
             in_move: false,
             move_start: (0, 0),
+            sized_rows: tmp.len(),
             back_dc: HDC(core::ptr::null_mut()),
             back_bmp: HBITMAP(core::ptr::null_mut()),
             back_prev: HGDIOBJ(core::ptr::null_mut()),
@@ -590,46 +639,25 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
 
-        // DPI changed (moved to a differently-scaled monitor): rescale font + size.
+        // The widget moved to a monitor with another scale, or its monitor's
+        // scale changed: a new font, then a resize from the suggested rect (the
+        // window's own when lParam has none), anchored unless a drag is in
+        // progress. A system relocation never becomes home (track_home false).
         WM_DPICHANGED => {
             let p = state_ptr(hwnd);
             if !p.is_null() {
-                let st = &mut *p;
-                let new_dpi = (wparam.0 & 0xFFFF) as u32;
-                st.dpi = if new_dpi == 0 { 96 } else { new_dpi };
-                let nf = create_mono_font(Scale(st.dpi), st.settings.font_px);
-                let _ = DeleteObject(HGDIOBJ(st.font.0));
-                st.font = nf;
-                let scale = Scale(st.dpi);
-                let mut tmp: Vec<Row> = Vec::new();
-                for s in &st.sources {
-                    s.rows(&mut tmp);
-                }
-                let w = win_w(scale, st.settings.font_px);
-                let h = window_height(scale, tmp.len() as i32, st.settings.font_px);
-                // Honor the OS-suggested position; keep our own row-driven size.
+                let in_move = {
+                    let st = &mut *p;
+                    let new_dpi = (wparam.0 & 0xFFFF) as u32;
+                    st.dpi = if new_dpi == 0 { 96 } else { new_dpi };
+                    let nf = create_mono_font(Scale(st.dpi), st.settings.font_px);
+                    let _ = DeleteObject(HGDIOBJ(st.font.0));
+                    st.font = nf;
+                    st.in_move
+                };
                 let r = lparam.0 as *const RECT;
-                if r.is_null() {
-                    let _ = SetWindowPos(
-                        hwnd,
-                        None,
-                        0,
-                        0,
-                        w,
-                        h,
-                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-                    );
-                } else {
-                    let _ = SetWindowPos(
-                        hwnd,
-                        None,
-                        (*r).left,
-                        (*r).top,
-                        w,
-                        h,
-                        SWP_NOZORDER | SWP_NOACTIVATE,
-                    );
-                }
+                let from = if r.is_null() { None } else { Some(*r) };
+                relayout(hwnd, from, !in_move, false);
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             LRESULT(0)
@@ -899,14 +927,14 @@ pub(crate) unsafe fn queue_apply(main: HWND, new: Settings) -> bool {
 /// Apply new settings in a fixed order: every AppState change under one short
 /// borrow, then the resize after it (SetWindowPos sends messages to the widget,
 /// and no AppState reference may be live across such a call), then persist,
-/// last, so the saved position is the one after the resize. Returns the hotkey
-/// warning, which the caller shows with no AppState reference live.
+/// last, so a home the resize moved is saved. Returns the hotkey warning,
+/// which the caller shows with no AppState reference live.
 unsafe fn apply_settings(hwnd: HWND, new: Settings) -> Option<String> {
     let p = state_ptr(hwnd);
     if p.is_null() {
         return None;
     }
-    let (size, toggle, settings, res) = {
+    let (resize, toggle, settings, res) = {
         let st = &mut *p;
         // The settings window never moves the widget: keep its home.
         let pos = st.settings.pos;
@@ -937,8 +965,8 @@ unsafe fn apply_settings(hwnd: HWND, new: Settings) -> Option<String> {
             SetTimer(Some(hwnd), TIMER_ID, first_tick_ms(st.settings.interval_ms), None);
         }
         // The widget's size depends on both the row count (metrics) and the
-        // font (rows + width scale with it): measured here, applied below.
-        let size = (order_changed || font_changed).then(|| fitted_size(st));
+        // font (rows + width scale with it): resized below.
+        let resize = order_changed || font_changed;
         let res = if st.settings.hotkey_toggle != old.hotkey_toggle
             || st.settings.hotkey_settings != old.hotkey_settings
         {
@@ -947,10 +975,12 @@ unsafe fn apply_settings(hwnd: HWND, new: Settings) -> Option<String> {
         } else {
             None
         };
-        (size, st.settings.hotkey_toggle, st.settings.hotkey_settings, res)
+        (resize, st.settings.hotkey_toggle, st.settings.hotkey_settings, res)
     };
-    if let Some(size) = size {
-        apply_window_size(hwnd, size);
+    if resize {
+        // Anchored to the widget's nearest corner; home follows unless the work
+        // area clamps the widget or it is displaced.
+        relayout(hwnd, None, true, true);
     }
     let p = state_ptr(hwnd);
     if !p.is_null() {
