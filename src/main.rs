@@ -36,6 +36,7 @@ mod temp;
 
 use core::cell::RefCell;
 use core::ffi::c_void;
+use core::sync::atomic::{AtomicU32, Ordering};
 use std::path::PathBuf;
 
 use windows::core::{w, Error, Result, PCWSTR};
@@ -46,21 +47,24 @@ use windows::Win32::Graphics::Gdi::{
     CLEARTYPE_QUALITY, HBITMAP, HDC, HFONT, HGDIOBJ, LOGFONTW, PAINTSTRUCT, SRCCOPY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-    DestroyWindow, DispatchMessageW, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
-    GetMessageW, GetWindowLongPtrW, GetWindowRect, IsDialogMessageW, IsWindow, KillTimer,
-    LoadCursorW, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TrackPopupMenu, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GA_ROOT,
-    GWLP_USERDATA, GWL_EXSTYLE, HICON, HTCAPTION, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA,
-    MB_ICONWARNING, MB_OK, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, SPI_SETWORKAREA,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE,
-    WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONUP,
+    AppendMenuW, ChangeWindowMessageFilterEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+    DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetAncestor,
+    GetClassNameW, GetClientRect, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowRect,
+    IsDialogMessageW, IsWindow, KillTimer, LoadCursorW, MessageBoxW, PostMessageW, PostQuitMessage,
+    RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
+    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TrackPopupMenu, TranslateMessage,
+    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GA_ROOT, GWLP_USERDATA, GWL_EXSTYLE, HICON, HTCAPTION,
+    HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, MB_ICONWARNING, MB_OK, MF_CHECKED, MF_POPUP, MF_SEPARATOR,
+    MF_STRING, MSG, MSGFLT_ALLOW, SM_CXSMICON, SPI_SETWORKAREA, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP,
+    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
+    WM_EXITSIZEMOVE, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_NCHITTEST, WM_NCRBUTTONUP, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
     WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
@@ -85,6 +89,16 @@ const WM_TRAY: u32 = WM_APP + 1;
 /// Window moved to a monitor with different DPI scaling.
 const WM_DPICHANGED: u32 = 0x02E0;
 const TRAY_UID: u32 = 1;
+/// The timer that retries a failed tray add (add_tray_icon) every
+/// TRAY_RETRY_MS, at most TRAY_MAX_TRIES times; TIMER_ID is the sampling one.
+const TRAY_TIMER_ID: usize = 2;
+const TRAY_RETRY_MS: u32 = 2000;
+const TRAY_MAX_TRIES: u8 = 10;
+/// The shell's "TaskbarCreated" message, registered in main() (0 until then,
+/// or if registering failed). Explorer broadcasts it when it creates the
+/// taskbar, after a restart for example, and on Windows 10 also when the
+/// primary display's DPI changes; every tray icon is added again then.
+static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 const ID_SHOWHIDE: usize = 1;
 const ID_STARTUP: usize = 2;
 const ID_EXIT: usize = 3;
@@ -118,9 +132,14 @@ struct AppState {
     font: HFONT,
     /// Current monitor DPI (96 = 100%); drives all layout scaling.
     dpi: u32,
-    /// Runtime-drawn app icon (class, 32px) + tray variant (16px); freed on destroy.
-    icon: HICON,
+    /// The tray icon, drawn at the taskbar's small-icon size (tray_icon); drawn
+    /// again when the taskbar is recreated, freed on destroy.
     icon_sm: HICON,
+    /// Set by a tray double-click, so that the button-up after it does not
+    /// toggle the widget a second time (tray_left_click).
+    tray_dblclk: bool,
+    /// Tray-add retries since the retry timer (TRAY_TIMER_ID) last started.
+    tray_tries: u8,
     visible: bool,
     /// Click-through "lock": when on, the widget ignores the mouse (WS_EX_TRANSPARENT)
     /// so it never blocks clicks; toggled from the tray (runtime-only).
@@ -284,17 +303,20 @@ fn main() -> Result<()> {
     // SAFETY: the whole window lifecycle is Win32 FFI. Every call is annotated
     // inline; all handles are produced by the OS and used only while valid.
     unsafe {
+        // Before the window exists: WM_CREATE lets this message through UIPI,
+        // and wnd_proc adds the tray icon again when it arrives.
+        TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Ordering::Relaxed);
         let hinstance = HINSTANCE(GetModuleHandleW(None)?.0);
 
-        // TinyMon icon drawn at runtime: 32px for the class, 16px for the tray.
-        let icon = icon::create_app_icon(32);
-        let icon_sm = icon::create_app_icon(16);
+        // The tray icon, drawn at runtime at the taskbar's small-icon size.
+        // The class has no icon: the widget, a captionless tool window,
+        // never shows one.
+        let icon_sm = tray_icon();
 
         let wc = WNDCLASSW {
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(wnd_proc),
             hInstance: hinstance,
-            hIcon: icon,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             hbrBackground: CreateSolidBrush(COLORREF(BG_COLOR)),
             lpszClassName: CLASS_NAME,
@@ -345,8 +367,9 @@ fn main() -> Result<()> {
             settings,
             font,
             dpi,
-            icon,
             icon_sm,
+            tray_dblclk: false,
+            tray_tries: 0,
             visible: true,
             locked: false,
             displaced: false,
@@ -456,8 +479,8 @@ unsafe extern "system" fn wnd_proc(
 ) -> LRESULT {
     match msg {
         // Stash the Box<AppState> pointer, start the timer (its first tick
-        // within a second, see first_tick_ms), place the window, add the tray
-        // icon.
+        // within a second, see first_tick_ms), place the window, let
+        // TaskbarCreated through UIPI, add the tray icon (retried on failure).
         WM_CREATE => {
             let cs = lparam.0 as *const CREATESTRUCTW;
             if !cs.is_null() {
@@ -487,16 +510,35 @@ unsafe extern "system" fn wnd_proc(
             // Before the first show: from the provisional rect to home, or as
             // close to it as the screen allows.
             place_widget(hwnd);
-            add_tray_icon(hwnd);
+            // UIPI drops registered messages from senders of lower integrity,
+            // so an elevated instance would never hear Explorer's
+            // TaskbarCreated; allowing it does nothing at medium integrity.
+            let allowed = ChangeWindowMessageFilterEx(
+                hwnd,
+                TASKBAR_CREATED.load(Ordering::Relaxed),
+                MSGFLT_ALLOW,
+                None,
+            );
+            debug_assert!(allowed.is_ok(), "ChangeWindowMessageFilterEx: {allowed:?}");
+            if !add_tray_icon(hwnd) {
+                start_tray_retry(hwnd);
+            }
             LRESULT(0)
         }
 
         // We repaint the whole client from the back buffer — nothing to erase.
         WM_ERASEBKGND => LRESULT(1),
 
-        // Every interval_ms: sample every enabled source, record the
+        // WM_TIMER dispatches on its id. TRAY_TIMER_ID runs only after a
+        // failed tray add: try again (retry_tray_icon).
+        WM_TIMER if wparam.0 == TRAY_TIMER_ID => {
+            retry_tray_icon(hwnd);
+            LRESULT(0)
+        }
+
+        // TIMER_ID, every interval_ms: sample every enabled source, record the
         // sparklines, resize if the row count changed, then repaint.
-        WM_TIMER => {
+        WM_TIMER if wparam.0 == TIMER_ID => {
             let p = state_ptr(hwnd);
             if !p.is_null() {
                 let n = {
@@ -530,12 +572,20 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
 
-        // Tray icon callback: left-click toggles show/hide, right-click menus.
+        // Tray icon callback: a left click toggles show/hide (a double-click
+        // too, once: tray_left_click), a right click opens the menu.
         WM_TRAY => {
             match (lparam.0 as u32) & 0xFFFF {
-                WM_LBUTTONUP => toggle_visibility(hwnd),
                 WM_RBUTTONUP => show_context_menu(hwnd),
-                _ => {}
+                mouse => {
+                    // The flag changes under a borrow that ends before the
+                    // toggle, which sends messages to the widget.
+                    let p = state_ptr(hwnd);
+                    let toggle = !p.is_null() && tray_left_click(&mut (*p).tray_dblclk, mouse);
+                    if toggle {
+                        toggle_visibility(hwnd);
+                    }
+                }
             }
             LRESULT(0)
         }
@@ -708,6 +758,7 @@ unsafe extern "system" fn wnd_proc(
             remove_tray_icon(hwnd);
             hotkeys::unregister(hwnd);
             let _ = KillTimer(Some(hwnd), TIMER_ID);
+            let _ = KillTimer(Some(hwnd), TRAY_TIMER_ID);
             let p = state_ptr(hwnd);
             if !p.is_null() {
                 // Close the settings window first if it's still open.
@@ -719,11 +770,29 @@ unsafe extern "system" fn wnd_proc(
                 let mut st = Box::from_raw(p); // reclaim; sources drop (PDH queries close)
                 destroy_back_buffer(&mut st);
                 let _ = DeleteObject(HGDIOBJ(st.font.0));
-                let _ = DestroyIcon(st.icon);
                 let _ = DestroyIcon(st.icon_sm);
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             }
             PostQuitMessage(0);
+            LRESULT(0)
+        }
+
+        // The taskbar was created again: Explorer restarted, or (Windows 10)
+        // the primary display's DPI changed. Draw the icon at the tray's
+        // current size and add it again (NIM_MODIFY if it is still there),
+        // restarting the retry if that fails; then free the old icon, of
+        // which the shell keeps its own copy.
+        m if m != 0 && m == TASKBAR_CREATED.load(Ordering::Relaxed) => {
+            let p = state_ptr(hwnd);
+            if !p.is_null() {
+                let new = tray_icon();
+                let old = core::mem::replace(&mut (*p).icon_sm, new);
+                let _ = KillTimer(Some(hwnd), TRAY_TIMER_ID);
+                if !add_tray_icon(hwnd) {
+                    start_tray_retry(hwnd);
+                }
+                let _ = DestroyIcon(old);
+            }
             LRESULT(0)
         }
 
@@ -738,8 +807,11 @@ unsafe fn state_ptr(hwnd: HWND) -> *mut AppState {
 
 // ---- Tray icon -------------------------------------------------------------
 
-/// Add the notification-area (tray) icon for this window.
-unsafe fn add_tray_icon(hwnd: HWND) {
+/// Add the notification-area (tray) icon for this window. If it is there
+/// already (an add that timed out may still have landed), NIM_MODIFY updates
+/// it instead, so calling this again is harmless. Returns whether the icon is
+/// in the tray.
+unsafe fn add_tray_icon(hwnd: HWND) -> bool {
     let p = state_ptr(hwnd);
     let hicon = if p.is_null() { HICON(core::ptr::null_mut()) } else { (*p).icon_sm };
     let mut nid = NOTIFYICONDATAW {
@@ -754,7 +826,70 @@ unsafe fn add_tray_icon(hwnd: HWND) {
     let tip: Vec<u16> = "TinyMon".encode_utf16().collect();
     nid.szTip[..tip.len()].copy_from_slice(&tip);
     // SAFETY: Shell_NotifyIconW reads the descriptor; hWnd/uID identify the icon.
-    let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+    Shell_NotifyIconW(NIM_ADD, &nid).as_bool() || Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool()
+}
+
+/// Retry a failed tray add every TRAY_RETRY_MS, counting the tries from zero.
+unsafe fn start_tray_retry(hwnd: HWND) {
+    let p = state_ptr(hwnd);
+    if !p.is_null() {
+        (*p).tray_tries = 0;
+    }
+    SetTimer(Some(hwnd), TRAY_TIMER_ID, TRAY_RETRY_MS, None);
+}
+
+/// One tick of the tray retry: add the icon again, and stop retrying once it
+/// is in the tray or after TRAY_MAX_TRIES tries. A shell that hangs can block
+/// each try for Shell_NotifyIconW's timeout, which the cap bounds.
+unsafe fn retry_tray_icon(hwnd: HWND) {
+    let p = state_ptr(hwnd);
+    if p.is_null() {
+        return;
+    }
+    let tries = {
+        let st = &mut *p;
+        st.tray_tries = st.tray_tries.saturating_add(1);
+        st.tray_tries
+    };
+    if add_tray_icon(hwnd) || tries >= TRAY_MAX_TRIES {
+        let _ = KillTimer(Some(hwnd), TRAY_TIMER_ID);
+    }
+}
+
+/// The DPI the taskbar draws its icons at: that of Explorer's Shell_TrayWnd,
+/// or the system DPI without a taskbar. GetSystemMetrics is not suitable for
+/// a per-monitor-aware thread, so the tray size is asked for at this DPI.
+unsafe fn tray_dpi() -> u32 {
+    let dpi = match FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()) {
+        Ok(tray) => GetDpiForWindow(tray),
+        Err(_) => 0,
+    };
+    if dpi == 0 {
+        dpi::system_dpi()
+    } else {
+        dpi
+    }
+}
+
+/// The tray icon at the taskbar's small-icon size (16 px at 100%; 20, 24 and
+/// 32 px at 125, 150 and 200%), so that it stays sharp at any scaling.
+unsafe fn tray_icon() -> HICON {
+    icon::create_app_icon(GetSystemMetricsForDpi(SM_CXSMICON, tray_dpi()).max(16))
+}
+
+/// Whether a left-button tray callback toggles the widget. A version-0 tray
+/// icon reports a double-click as DOWN, UP, DBLCLK, UP: the DBLCLK sets
+/// `swallow`, so the UP after it does not toggle again and a double-click
+/// toggles once, like a click. A new press clears the flag, so an UP lost
+/// after a double-click (released off the icon) cannot eat the next click.
+fn tray_left_click(swallow: &mut bool, mouse_msg: u32) -> bool {
+    match mouse_msg {
+        WM_LBUTTONDOWN => *swallow = false,
+        WM_LBUTTONDBLCLK => *swallow = true,
+        WM_LBUTTONUP => return !core::mem::take(swallow),
+        _ => {}
+    }
+    false
 }
 
 /// Remove our tray icon (called on exit so it doesn't leave a ghost).
@@ -1200,5 +1335,33 @@ mod tests {
         assert!(!layout_dirty(5, 6, true, false));
         // A new font or metric order resizes even with the same row count.
         assert!(layout_dirty(5, 5, false, true));
+    }
+
+    /// How many times a run of left-button tray callbacks toggles the widget,
+    /// starting with no double-click pending.
+    fn tray_toggles(msgs: &[u32]) -> usize {
+        let mut swallow = false;
+        msgs.iter().filter(|&&m| tray_left_click(&mut swallow, m)).count()
+    }
+
+    #[test]
+    fn tray_double_click_toggles_once() {
+        // A version-0 tray icon reports a double-click as DOWN, UP, DBLCLK, UP.
+        let msgs = [WM_LBUTTONDOWN, WM_LBUTTONUP, WM_LBUTTONDBLCLK, WM_LBUTTONUP];
+        assert_eq!(tray_toggles(&msgs), 1);
+    }
+
+    #[test]
+    fn tray_separate_clicks_each_toggle() {
+        let msgs = [WM_LBUTTONDOWN, WM_LBUTTONUP, WM_LBUTTONDOWN, WM_LBUTTONUP];
+        assert_eq!(tray_toggles(&msgs), 2);
+    }
+
+    #[test]
+    fn tray_lost_up_after_double_click_does_not_eat_next_click() {
+        // The UP after the DBLCLK never came (the button was released off the
+        // icon): the next click still toggles.
+        let msgs = [WM_LBUTTONDOWN, WM_LBUTTONUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP];
+        assert_eq!(tray_toggles(&msgs), 2);
     }
 }

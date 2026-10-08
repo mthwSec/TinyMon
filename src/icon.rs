@@ -1,6 +1,7 @@
-//! A small TinyMon icon drawn at runtime with GDI — no `.ico` asset, no build
-//! dependency, so the single self-contained `.exe` stays self-contained. The
-//! glyph is a tiny bar-graph (echoing the widget) on a dark rounded square.
+//! The tray icon, drawn at runtime with GDI at the taskbar's small-icon size
+//! (16 px at 100%, up to 32 px at 200%): a tiny bar graph (echoing the widget)
+//! on a dark rounded square. The exe's own icon is a separate asset,
+//! `icon.ico`, which build.rs embeds as icon resource 1.
 
 use core::ffi::c_void;
 use core::mem::size_of;
@@ -71,8 +72,7 @@ fn paint_icon(px: i32, buf: &mut [u32]) {
     }
 }
 
-/// Build an `HICON` of `px`*`px`. Best-effort: returns a null icon on failure
-/// (the window/tray then falls back to the system default).
+/// Build an `HICON` of `px`*`px`. Best-effort: returns a null icon on failure.
 pub unsafe fn create_app_icon(px: i32) -> HICON {
     let null = HICON(core::ptr::null_mut());
     let bmi = BITMAPINFO {
@@ -127,5 +127,20 @@ mod tests {
         // the tall green bar is present somewhere
         let green = argb(0xFF, 92, 200, 92);
         assert!(buf.contains(&green));
+    }
+
+    /// The tray icon is drawn at the taskbar's small-icon size: 20, 24 and 32
+    /// px at 125, 150 and 200% scaling.
+    #[test]
+    fn glyph_paints_at_small_icon_sizes() {
+        let green = argb(0xFF, 92, 200, 92);
+        for px in [20, 24, 32] {
+            let mut buf = vec![0u32; (px * px) as usize];
+            paint_icon(px, &mut buf);
+            assert_eq!(buf[0] >> 24, 0, "{px} px: the corner is transparent");
+            let top_center = ((px / 8) * px + px / 2) as usize;
+            assert_eq!(buf[top_center] >> 24, 0xFF, "{px} px: the background is opaque");
+            assert!(buf.contains(&green), "{px} px: the green bar is drawn");
+        }
     }
 }
