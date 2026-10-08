@@ -149,6 +149,24 @@ impl MetricKey {
             MetricKey::Temp => (224, 128, 80), // orange
         }
     }
+    /// Whether the metric's value is a delta between two samples (CPU and GPU
+    /// load, per-core CPU, disk and network throughput): a reading taken right
+    /// after the sampler's baseline is not real, so its rows show `PENDING`
+    /// until the first tick. Exhaustive on purpose: a new metric must be
+    /// classified. Unrelated to `Row::rate`, which marks the throughput rows
+    /// that never raise the red alert.
+    pub fn is_delta(self) -> bool {
+        match self {
+            MetricKey::Cpu
+            | MetricKey::PerCpu
+            | MetricKey::Gpu
+            | MetricKey::Disk
+            | MetricKey::Net => true,
+            MetricKey::Ram | MetricKey::Vram | MetricKey::Uptime | MetricKey::Battery => false,
+            #[cfg(feature = "temp")]
+            MetricKey::Temp => false,
+        }
+    }
     /// Every metric, in the order they appear in the settings list.
     #[cfg(not(feature = "temp"))]
     pub const ALL: [MetricKey; 9] = [
@@ -296,14 +314,37 @@ pub fn build_sources(settings: &Settings) -> Vec<MetricSource> {
         .collect()
 }
 
+/// Shown instead of a delta metric's value until a full period has passed
+/// since its sampler's baseline: an ellipsis.
+pub const PENDING: &str = "\u{2026}";
+
+/// Mask rows whose values are not real yet: each value becomes `PENDING` and a
+/// bar drops to an empty track (no bogus level, no red alert); value-only rows
+/// stay value-only.
+pub fn mask_pending(rows: &mut [Row]) {
+    for row in rows {
+        row.value = PENDING.into();
+        if row.bar.is_some() {
+            row.bar = Some(0.0);
+        }
+    }
+}
+
 /// Every source's rows in display order, each tagged with its source's metric
 /// (`keys[i]` is the metric of `rows[i]`): the one flatten that painting and
-/// the sparkline history (`history::row_ids`) read rows through.
-pub fn collect_rows(sources: &[MetricSource]) -> (Vec<Row>, Vec<MetricKey>) {
+/// the sparkline history (`history::row_ids`) read rows through. While
+/// `pending` (from a build of the sources until the first tick), the rows of
+/// delta metrics are masked (`mask_pending`); WM_TIMER passes false, so a
+/// masked value never reaches the history.
+pub fn collect_rows(sources: &[MetricSource], pending: bool) -> (Vec<Row>, Vec<MetricKey>) {
     let mut rows = Vec::new();
     let mut keys = Vec::new();
     for s in sources {
+        let start = rows.len();
         s.rows(&mut rows);
+        if pending && s.key().is_delta() {
+            mask_pending(&mut rows[start..]);
+        }
         keys.resize(rows.len(), s.key());
     }
     (rows, keys)
@@ -472,9 +513,57 @@ mod tests {
             MetricSource::Uptime { ms: 3_600_000 },
             MetricSource::Ram { info: MemInfo { load_pct: 58.0, used_gib: 9.3, total_gib: 16.0 } },
         ];
-        let (rows, keys) = collect_rows(&sources);
+        let (rows, keys) = collect_rows(&sources, false);
         let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
         assert_eq!(labels, ["Up", "RAM"]);
         assert_eq!(keys, [MetricKey::Uptime, MetricKey::Ram]);
+    }
+
+    #[test]
+    fn delta_metrics_are_flagged() {
+        let delta: Vec<MetricKey> = MetricKey::ALL.into_iter().filter(|k| k.is_delta()).collect();
+        assert_eq!(
+            delta,
+            [MetricKey::Cpu, MetricKey::Gpu, MetricKey::PerCpu, MetricKey::Disk, MetricKey::Net]
+        );
+    }
+
+    #[test]
+    fn pending_mask_hides_values_until_first_full_interval() {
+        let mut rows = [cpu_row(73.0), Row::na("GPU")];
+        mask_pending(&mut rows);
+        assert_eq!((rows[0].value.as_str(), rows[0].bar), ("\u{2026}", Some(0.0)));
+        assert_eq!((rows[1].value.as_str(), rows[1].bar), ("\u{2026}", None));
+    }
+
+    #[test]
+    fn pending_mask_clears_a_bogus_red_alert() {
+        let mut rows = [crate::percpu::percpu_row(0, 100.0)];
+        assert!(crate::render::is_critical(&rows[0])); // the bogus first value alerts
+        mask_pending(&mut rows);
+        assert!(!crate::render::is_critical(&rows[0]));
+    }
+
+    #[test]
+    fn collect_rows_masks_only_delta_metrics_while_pending() {
+        let settings =
+            Settings { order: vec![MetricKey::PerCpu, MetricKey::Ram], ..Settings::defaults() };
+        let mut sources = build_sources(&settings);
+        for s in sources.iter_mut() {
+            s.sample();
+        }
+        let (rows, keys) = collect_rows(&sources, true);
+        assert!(keys.contains(&MetricKey::PerCpu));
+        assert_eq!(keys.last(), Some(&MetricKey::Ram));
+        for (row, key) in rows.iter().zip(&keys) {
+            if *key == MetricKey::PerCpu {
+                assert_eq!((row.value.as_str(), row.bar), (PENDING, Some(0.0)), "{}", row.label);
+            } else {
+                assert_ne!(row.value, PENDING);
+                assert!(row.bar.is_some_and(|b| b > 0.0), "RAM shows its real load");
+            }
+        }
+        let (rows, _) = collect_rows(&sources, false);
+        assert!(rows.iter().all(|r| r.value != PENDING));
     }
 }

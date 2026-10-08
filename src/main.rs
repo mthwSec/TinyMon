@@ -107,6 +107,10 @@ struct AppState {
     /// Recent bar values for the sparklines, kept per row identity (metric,
     /// label, nth), so they survive row-count changes, reorders and Apply.
     history: History,
+    /// True from a build of the sources until the next tick: delta metrics
+    /// (`MetricKey::is_delta`) show `registry::PENDING` meanwhile, since their
+    /// primed values cover only the moment since their baseline.
+    first_tick_pending: bool,
     settings: Settings,
     font: HFONT,
     /// Current monitor DPI (96 = 100%); drives all layout scaling.
@@ -144,6 +148,13 @@ fn fitted_size(st: &AppState) -> (i32, i32) {
 /// widget, so no AppState reference may be live across this call.
 unsafe fn apply_window_size(hwnd: HWND, (w, h): (i32, i32)) {
     let _ = SetWindowPos(hwnd, None, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+/// The period of the first tick after the sources are built (at startup and on
+/// a metric Apply): at most a second, so the pending marker shows only briefly.
+/// That tick re-arms the timer at the configured interval.
+fn first_tick_ms(interval_ms: u32) -> u32 {
+    interval_ms.min(1000)
 }
 
 fn main() -> Result<()> {
@@ -186,8 +197,11 @@ fn main() -> Result<()> {
         let scale = Scale(dpi);
         let font = create_mono_font(scale, settings.font_px);
         let mut sources = build_sources(&settings);
-        // Prime each source so variable-row metrics (per-core CPU, GPUs) report
-        // their row count before we size the window.
+        // Prime each source: instantaneous metrics (RAM, VRAM, battery) get their
+        // first value and variable-row metrics (per-core CPU, GPUs) their row
+        // count before the window is sized. A delta metric's primed value covers
+        // only the moment since its baseline, so it shows as pending until the
+        // first tick (first_tick_pending, first_tick_ms).
         for s in sources.iter_mut() {
             s.sample();
         }
@@ -206,6 +220,7 @@ fn main() -> Result<()> {
         let state = Box::new(AppState {
             sources,
             history: History::default(),
+            first_tick_pending: true,
             settings,
             font,
             dpi,
@@ -314,8 +329,8 @@ unsafe extern "system" fn wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
-        // Stash the Box<AppState> pointer, start the timer (interval from
-        // settings), add the tray icon.
+        // Stash the Box<AppState> pointer, start the timer (its first tick
+        // within a second, see first_tick_ms), add the tray icon.
         WM_CREATE => {
             let cs = lparam.0 as *const CREATESTRUCTW;
             if !cs.is_null() {
@@ -323,7 +338,7 @@ unsafe extern "system" fn wnd_proc(
             }
             let p = state_ptr(hwnd);
             let interval = if p.is_null() { 1000 } else { (*p).settings.interval_ms };
-            SetTimer(Some(hwnd), TIMER_ID, interval, None);
+            SetTimer(Some(hwnd), TIMER_ID, first_tick_ms(interval), None);
             if !p.is_null() {
                 // At startup, register silently (no popup if a combo is taken).
                 let _ = hotkeys::register(
@@ -357,7 +372,15 @@ unsafe extern "system" fn wnd_proc(
                 for s in st.sources.iter_mut() {
                     s.sample();
                 }
-                let (rows, keys) = collect_rows(&st.sources);
+                // The first tick after a build of the sources may come early
+                // (first_tick_ms): it ends the pending marker and re-arms the
+                // timer at the configured interval.
+                let interval = st.settings.interval_ms;
+                let first = core::mem::take(&mut st.first_tick_pending);
+                if first && first_tick_ms(interval) < interval {
+                    SetTimer(Some(hwnd), TIMER_ID, interval, None);
+                }
+                let (rows, keys) = collect_rows(&st.sources, false);
                 st.history.record(&row_ids(&keys, &rows), &rows);
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
@@ -457,7 +480,7 @@ unsafe extern "system" fn wnd_proc(
                 let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
                 ensure_back_buffer(st, hdc, w, h);
                 if !st.back_dc.0.is_null() {
-                    let (rows, keys) = collect_rows(&st.sources);
+                    let (rows, keys) = collect_rows(&st.sources, st.first_tick_pending);
                     let ids = row_ids(&keys, &rows);
                     let hist: Vec<&[f32]> = ids.iter().map(|id| st.history.get(id)).collect();
                     let theme = if st.settings.light { &LIGHT } else { &THEME };
@@ -831,6 +854,10 @@ unsafe fn apply_settings(hwnd: HWND, new: Settings) -> Option<String> {
             for s in st.sources.iter_mut() {
                 s.sample();
             }
+            // The new sources' delta values are not real yet: show them as
+            // pending and tick early (this re-arm supersedes the interval one).
+            st.first_tick_pending = true;
+            SetTimer(Some(hwnd), TIMER_ID, first_tick_ms(st.settings.interval_ms), None);
         }
         // The widget's size depends on both the row count (metrics) and the
         // font (rows + width scale with it): measured here, applied below.
@@ -991,5 +1018,12 @@ mod tests {
             assert!(!queue_apply(hwnd, Settings::defaults()));
             assert_eq!(take_pending_apply(), None);
         }
+    }
+
+    #[test]
+    fn first_tick_is_capped_at_one_second() {
+        assert_eq!(first_tick_ms(250), 250);
+        assert_eq!(first_tick_ms(1000), 1000);
+        assert_eq!(first_tick_ms(10000), 1000);
     }
 }
