@@ -329,6 +329,19 @@ fn first_tick_ms(interval_ms: u32) -> u32 {
     interval_ms.min(1000)
 }
 
+/// The period TIMER_ID is armed with when an Apply changes the interval.
+/// While the first tick after a build of the sources is still due, it is
+/// that tick's capped period (first_tick_ms), so the pending marker still
+/// ends within a second; the tick then re-arms at the interval. Otherwise
+/// it is the interval.
+fn timer_period(interval_ms: u32, first_tick_pending: bool) -> u32 {
+    if first_tick_pending {
+        first_tick_ms(interval_ms)
+    } else {
+        interval_ms
+    }
+}
+
 fn main() -> Result<()> {
     // Per-Monitor-V2 DPI awareness must precede any window/GDI sizing.
     dpi::set_process_dpi_aware();
@@ -1178,8 +1191,10 @@ unsafe fn apply_settings(hwnd: HWND, new: Settings) -> Option<String> {
             let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), st.settings.opacity, LWA_ALPHA);
         }
         if st.settings.interval_ms != old.interval_ms {
+            // A first tick still due keeps its capped period (timer_period).
+            let period = timer_period(st.settings.interval_ms, st.first_tick_pending);
             let _ = KillTimer(Some(hwnd), TIMER_ID);
-            SetTimer(Some(hwnd), TIMER_ID, st.settings.interval_ms, None);
+            SetTimer(Some(hwnd), TIMER_ID, period, None);
         }
         let font_changed = st.settings.font_px != old.font_px;
         if font_changed {
@@ -1367,6 +1382,19 @@ mod tests {
         assert_eq!(first_tick_ms(250), 250);
         assert_eq!(first_tick_ms(1000), 1000);
         assert_eq!(first_tick_ms(10000), 1000);
+    }
+
+    #[test]
+    fn interval_apply_keeps_a_pending_first_tick_short() {
+        // An Apply that changes only the interval while the first tick after
+        // a build of the sources is still due: that tick still comes within a
+        // second (it re-arms at the interval), so the pending marker ends.
+        assert_eq!(timer_period(10000, true), 1000);
+        assert_eq!(timer_period(3000, true), 1000);
+        assert_eq!(timer_period(250, true), 250);
+        // Otherwise the timer runs at the new interval.
+        assert_eq!(timer_period(10000, false), 10000);
+        assert_eq!(timer_period(250, false), 250);
     }
 
     #[test]
