@@ -25,6 +25,8 @@ mod metrics;
 mod net;
 mod pdh;
 mod percpu;
+#[cfg_attr(not(test), expect(dead_code, reason = "tested before the widget is wired to it"))]
+mod placement;
 mod registry;
 mod render;
 mod settings;
