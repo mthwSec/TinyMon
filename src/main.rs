@@ -56,13 +56,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LoadCursorW, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow,
     SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     TrackPopupMenu, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GA_ROOT,
-    GWLP_USERDATA, GWL_EXSTYLE, HICON, HTCAPTION, IDC_ARROW, LWA_ALPHA, MB_ICONWARNING, MB_OK,
-    MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, SPI_SETWORKAREA, SWP_NOACTIVATE,
-    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE,
-    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
-    WM_EXITSIZEMOVE, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONUP, WM_NCHITTEST, WM_NCRBUTTONUP, WM_NULL,
-    WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    GWLP_USERDATA, GWL_EXSTYLE, HICON, HTCAPTION, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA,
+    MB_ICONWARNING, MB_OK, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, SPI_SETWORKAREA,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE,
+    WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONUP,
+    WM_NCHITTEST, WM_NCRBUTTONUP, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
+    WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, VK_ESCAPE, VK_RETURN, VK_TAB};
@@ -380,7 +380,8 @@ fn main() -> Result<()> {
         // Opacity from settings (state is now stored on the window).
         let opacity = (*state_ptr(hwnd)).settings.opacity;
         SetLayeredWindowAttributes(hwnd, COLORREF(0), opacity, LWA_ALPHA)?;
-        let _ = ShowWindow(hwnd, SW_SHOW);
+        // Shown without taking the focus from the app the user is in.
+        show_no_activate(hwnd);
         let _ = UpdateWindow(hwnd);
 
         let mut msg = MSG::default();
@@ -834,15 +835,33 @@ unsafe fn handle_command(hwnd: HWND, id: usize) {
     }
 }
 
-/// Flip the window between shown and hidden (tray-only).
+/// Flip the widget between shown and hidden (the tray icon, the toggle hotkey,
+/// the menu's Show/Hide). Showing never activates it (show_no_activate).
 unsafe fn toggle_visibility(hwnd: HWND) {
     let p = state_ptr(hwnd);
     if p.is_null() {
         return;
     }
-    let st = &mut *p;
-    st.visible = !st.visible;
-    let _ = ShowWindow(hwnd, if st.visible { SW_SHOW } else { SW_HIDE });
+    let visible = {
+        let st = &mut *p;
+        st.visible = !st.visible;
+        st.visible
+    };
+    if visible {
+        show_no_activate(hwnd);
+    } else {
+        let _ = ShowWindow(hwnd, SW_HIDE);
+    }
+}
+
+/// Show the widget without activating it, at the top of the topmost band.
+/// ShowWindow(SW_SHOW) would activate it, so the toggle hotkey would take the
+/// keyboard focus from the app the user is in, and SW_SHOWNA alone could
+/// leave it behind another always-on-top window. SetWindowPos sends messages
+/// to the widget, so no AppState reference may be live across this call.
+unsafe fn show_no_activate(hwnd: HWND) {
+    let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW;
+    let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
 }
 
 /// Hide the window to the tray (close/Escape behavior).
