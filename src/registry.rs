@@ -546,24 +546,38 @@ mod tests {
 
     #[test]
     fn collect_rows_masks_only_delta_metrics_while_pending() {
-        let settings =
-            Settings { order: vec![MetricKey::PerCpu, MetricKey::Ram], ..Settings::defaults() };
-        let mut sources = build_sources(&settings);
-        for s in sources.iter_mut() {
-            s.sample();
+        fn shown(rows: &[Row]) -> Vec<(&str, &str, Option<f32>)> {
+            rows.iter().map(|r| (r.label.as_str(), r.value.as_str(), r.bar)).collect()
         }
+        // Built by hand, so no PDH reading decides the rows (a priming sample
+        // may read every core, some or none): CPU is a delta row with a bar,
+        // and a per-core sampler that has not sampled shows the one value-only
+        // "Cores n/a" row that a priming sample reading no core leaves. RAM
+        // sits between them, so a mask that reaches past a delta metric's own
+        // rows shows on it.
+        let sources = [
+            MetricSource::Cpu { sampler: CpuSampler::new(), pct: 73.0 },
+            MetricSource::Ram { info: MemInfo { load_pct: 58.0, used_gib: 9.3, total_gib: 16.0 } },
+            MetricSource::PerCpu(PerCpuSampler::new()),
+        ];
         let (rows, keys) = collect_rows(&sources, true);
-        assert!(keys.contains(&MetricKey::PerCpu));
-        assert_eq!(keys.last(), Some(&MetricKey::Ram));
-        for (row, key) in rows.iter().zip(&keys) {
-            if *key == MetricKey::PerCpu {
-                assert_eq!((row.value.as_str(), row.bar), (PENDING, Some(0.0)), "{}", row.label);
-            } else {
-                assert_ne!(row.value, PENDING);
-                assert!(row.bar.is_some_and(|b| b > 0.0), "RAM shows its real load");
-            }
-        }
+        assert_eq!(keys, [MetricKey::Cpu, MetricKey::Ram, MetricKey::PerCpu]);
+        assert_eq!(
+            shown(&rows),
+            [
+                ("CPU", PENDING, Some(0.0)),
+                ("RAM", "58% 9.3/16G", Some(0.58)),
+                ("Cores", PENDING, None)
+            ]
+        );
         let (rows, _) = collect_rows(&sources, false);
-        assert!(rows.iter().all(|r| r.value != PENDING));
+        assert_eq!(
+            shown(&rows),
+            [
+                ("CPU", "73%", Some(0.73)),
+                ("RAM", "58% 9.3/16G", Some(0.58)),
+                ("Cores", "n/a", None)
+            ]
+        );
     }
 }
