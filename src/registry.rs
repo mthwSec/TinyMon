@@ -554,20 +554,28 @@ mod tests {
         // and a per-core sampler that has not sampled shows the one value-only
         // "Cores n/a" row that a priming sample reading no core leaves. RAM
         // sits between them, so a mask that reaches past a delta metric's own
-        // rows shows on it.
+        // rows shows on it. A disk sampler that has not sampled always shows
+        // two value-only n/a rows, so the mask must cover every row of a
+        // metric, not only its first, and each row must be tagged Disk.
         let sources = [
             MetricSource::Cpu { sampler: CpuSampler::new(), pct: 73.0 },
             MetricSource::Ram { info: MemInfo { load_pct: 58.0, used_gib: 9.3, total_gib: 16.0 } },
             MetricSource::PerCpu(PerCpuSampler::new()),
+            MetricSource::Disk(DiskSampler::new()),
         ];
         let (rows, keys) = collect_rows(&sources, true);
-        assert_eq!(keys, [MetricKey::Cpu, MetricKey::Ram, MetricKey::PerCpu]);
+        assert_eq!(
+            keys,
+            [MetricKey::Cpu, MetricKey::Ram, MetricKey::PerCpu, MetricKey::Disk, MetricKey::Disk]
+        );
         assert_eq!(
             shown(&rows),
             [
                 ("CPU", PENDING, Some(0.0)),
                 ("RAM", "58% 9.3/16G", Some(0.58)),
-                ("Cores", PENDING, None)
+                ("Cores", PENDING, None),
+                ("Disk R", PENDING, None),
+                ("Disk W", PENDING, None)
             ]
         );
         let (rows, _) = collect_rows(&sources, false);
@@ -576,7 +584,9 @@ mod tests {
             [
                 ("CPU", "73%", Some(0.73)),
                 ("RAM", "58% 9.3/16G", Some(0.58)),
-                ("Cores", "n/a", None)
+                ("Cores", "n/a", None),
+                ("Disk R", "n/a", None),
+                ("Disk W", "n/a", None)
             ]
         );
     }
