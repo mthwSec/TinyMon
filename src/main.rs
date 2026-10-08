@@ -245,6 +245,26 @@ unsafe fn relayout(hwnd: HWND, from: Option<RECT>, anchor: bool, track_home: boo
     moved
 }
 
+/// Whether the widget needs a resize: its row count `n` differs from the count
+/// it was last sized for (`sized`), or the caller forces one (a new font or
+/// metric order). Never during a drag: the first tick after the drag resizes
+/// for a row count that changed meanwhile.
+fn layout_dirty(sized: usize, n: usize, in_move: bool, force: bool) -> bool {
+    (force || n != sized) && !in_move
+}
+
+/// Resize the widget for its `n` rows when layout_dirty says so: relayout,
+/// anchored, with home following. Returns whether home changed, for the caller
+/// to save. relayout sends messages to the widget, so no AppState reference
+/// may be live across this call.
+unsafe fn sync_layout(hwnd: HWND, n: usize, force: bool) -> bool {
+    let p = state_ptr(hwnd);
+    if p.is_null() || !layout_dirty((*p).sized_rows, n, (*p).in_move, force) {
+        return false;
+    }
+    relayout(hwnd, None, true, true)
+}
+
 /// The period of the first tick after the sources are built (at startup and on
 /// a metric Apply): at most a second, so the pending marker shows only briefly.
 /// That tick re-arms the timer at the configured interval.
@@ -467,24 +487,37 @@ unsafe extern "system" fn wnd_proc(
         // We repaint the whole client from the back buffer — nothing to erase.
         WM_ERASEBKGND => LRESULT(1),
 
-        // Sample every enabled source once per second, then repaint.
+        // Every interval_ms: sample every enabled source, record the
+        // sparklines, resize if the row count changed, then repaint.
         WM_TIMER => {
             let p = state_ptr(hwnd);
             if !p.is_null() {
-                let st = &mut *p;
-                for s in st.sources.iter_mut() {
-                    s.sample();
+                let n = {
+                    let st = &mut *p;
+                    for s in st.sources.iter_mut() {
+                        s.sample();
+                    }
+                    // The first tick after a build of the sources may come
+                    // early (first_tick_ms): it ends the pending marker and
+                    // re-arms the timer at the configured interval.
+                    let interval = st.settings.interval_ms;
+                    let first = core::mem::take(&mut st.first_tick_pending);
+                    if first && first_tick_ms(interval) < interval {
+                        SetTimer(Some(hwnd), TIMER_ID, interval, None);
+                    }
+                    let (rows, keys) = collect_rows(&st.sources, false);
+                    st.history.record(&row_ids(&keys, &rows), &rows);
+                    rows.len()
+                };
+                // A source's row count can change between ticks (temperature
+                // sensors come and go): resize after the borrow, and save home
+                // only when the resize moved it.
+                if sync_layout(hwnd, n, false) {
+                    let p = state_ptr(hwnd);
+                    if !p.is_null() {
+                        persist(&*p);
+                    }
                 }
-                // The first tick after a build of the sources may come early
-                // (first_tick_ms): it ends the pending marker and re-arms the
-                // timer at the configured interval.
-                let interval = st.settings.interval_ms;
-                let first = core::mem::take(&mut st.first_tick_pending);
-                if first && first_tick_ms(interval) < interval {
-                    SetTimer(Some(hwnd), TIMER_ID, interval, None);
-                }
-                let (rows, keys) = collect_rows(&st.sources, false);
-                st.history.record(&row_ids(&keys, &rows), &rows);
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             LRESULT(0)
@@ -934,7 +967,7 @@ unsafe fn apply_settings(hwnd: HWND, new: Settings) -> Option<String> {
     if p.is_null() {
         return None;
     }
-    let (resize, toggle, settings, res) = {
+    let (n, force, toggle, settings, res) = {
         let st = &mut *p;
         // The settings window never moves the widget: keep its home.
         let pos = st.settings.pos;
@@ -965,8 +998,9 @@ unsafe fn apply_settings(hwnd: HWND, new: Settings) -> Option<String> {
             SetTimer(Some(hwnd), TIMER_ID, first_tick_ms(st.settings.interval_ms), None);
         }
         // The widget's size depends on both the row count (metrics) and the
-        // font (rows + width scale with it): resized below.
-        let resize = order_changed || font_changed;
+        // font (rows + width scale with it): a new font or order always
+        // resizes, below; otherwise only a changed row count does.
+        let force = order_changed || font_changed;
         let res = if st.settings.hotkey_toggle != old.hotkey_toggle
             || st.settings.hotkey_settings != old.hotkey_settings
         {
@@ -975,13 +1009,12 @@ unsafe fn apply_settings(hwnd: HWND, new: Settings) -> Option<String> {
         } else {
             None
         };
-        (resize, st.settings.hotkey_toggle, st.settings.hotkey_settings, res)
+        let n = collect_rows(&st.sources, false).0.len();
+        (n, force, st.settings.hotkey_toggle, st.settings.hotkey_settings, res)
     };
-    if resize {
-        // Anchored to the widget's nearest corner; home follows unless the work
-        // area clamps the widget or it is displaced.
-        relayout(hwnd, None, true, true);
-    }
+    // Anchored to the widget's nearest corner; home follows unless the work
+    // area clamps the widget or it is displaced (saved below either way).
+    sync_layout(hwnd, n, force);
     let p = state_ptr(hwnd);
     if !p.is_null() {
         persist(&*p);
@@ -1132,5 +1165,15 @@ mod tests {
         assert_eq!(first_tick_ms(250), 250);
         assert_eq!(first_tick_ms(1000), 1000);
         assert_eq!(first_tick_ms(10000), 1000);
+    }
+
+    #[test]
+    fn layout_dirty_on_count_change_but_not_mid_drag() {
+        assert!(layout_dirty(5, 6, false, false));
+        assert!(!layout_dirty(5, 5, false, false));
+        // During a drag nothing resizes; the first tick after it catches up.
+        assert!(!layout_dirty(5, 6, true, false));
+        // A new font or metric order resizes even with the same row count.
+        assert!(layout_dirty(5, 5, false, true));
     }
 }
