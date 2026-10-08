@@ -225,9 +225,9 @@ mod tests {
         assert_eq!(drag_end(p, (-180, 40)), Some((-180, 40)));
     }
 
-    /// Not a spec test: the two shims place_widget and snap_to_corner rely on.
-    /// A rect inside the primary work area resolves to that work area, and a
-    /// rect far off every monitor still gets a non-empty one to fit into.
+    /// Not a spec test: the two shims place_widget, relayout and snap_to_corner
+    /// rely on. A rect inside the primary work area resolves to that work area,
+    /// and a rect far off every monitor still gets a non-empty one to fit into.
     #[test]
     fn work_area_shims_always_return_a_usable_area() {
         let primary = primary_work_area();

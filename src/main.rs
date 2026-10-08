@@ -127,7 +127,10 @@ struct AppState {
     /// primed values cover only the moment since their baseline.
     first_tick_pending: bool,
     /// `settings.pos` is the widget's home, the spot the user chose: a drag or
-    /// Move to corner sets it; a move made only to fit a work area does not.
+    /// Move to corner sets it, and an unclamped anchored resize for a new row
+    /// count or font moves it along while the widget is at home (sync_layout,
+    /// placement::after_relayout); a move made only to fit a work area or for
+    /// a DPI change does not.
     settings: Settings,
     font: HFONT,
     /// Current monitor DPI (96 = 100%); drives all layout scaling.
@@ -1077,16 +1080,21 @@ unsafe fn toggle_theme(hwnd: HWND) {
 
 /// Toggle click-through "lock": when on, `WS_EX_TRANSPARENT` makes the widget
 /// ignore the mouse so it never blocks clicks underneath. Unlock from the tray.
+/// SetWindowLongPtrW sends WM_STYLECHANGING and WM_STYLECHANGED to the widget,
+/// so it runs after the borrow ends.
 unsafe fn toggle_lock(hwnd: HWND) {
     let p = state_ptr(hwnd);
     if p.is_null() {
         return;
     }
-    let st = &mut *p;
-    st.locked = !st.locked;
+    let locked = {
+        let st = &mut *p;
+        st.locked = !st.locked;
+        st.locked
+    };
     let mut ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
     let bit = WS_EX_TRANSPARENT.0 as isize;
-    if st.locked {
+    if locked {
         ex |= bit;
     } else {
         ex &= !bit;
@@ -1128,6 +1136,8 @@ fn persist(st: &AppState) {
 }
 
 /// Open the settings window (single-instance: focus it if already open).
+/// settings_win::open sends messages to the widget, so no AppState reference
+/// is live across it; the state is fetched again to store the new window.
 unsafe fn open_settings(hwnd: HWND) {
     let p = state_ptr(hwnd);
     if p.is_null() {
@@ -1137,7 +1147,11 @@ unsafe fn open_settings(hwnd: HWND) {
     if !existing.0.is_null() && IsWindow(Some(existing)).as_bool() {
         let _ = SetForegroundWindow(existing);
     } else {
-        (*p).settings_hwnd = settings_win::open(hwnd);
+        let sh = settings_win::open(hwnd);
+        let p = state_ptr(hwnd);
+        if !p.is_null() {
+            (*p).settings_hwnd = sh;
+        }
     }
 }
 
