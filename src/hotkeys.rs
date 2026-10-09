@@ -98,6 +98,31 @@ fn vk_to_name(vk: u32) -> String {
     format!("0x{:02X}", vk)
 }
 
+/// Whether key `vk` types text: Backspace, Tab, Enter, Space, the digits and
+/// letters, the numpad's keys and the OEM keys (the punctuation, and the extra
+/// key of 102-key keyboards).
+pub fn vk_types_text(vk: u32) -> bool {
+    matches!(
+        vk,
+        0x08 | 0x09
+            | 0x0D
+            | 0x20
+            | 0x30..=0x39
+            | 0x41..=0x5A
+            | 0x60..=0x6F
+            | 0xBA..=0xC2
+            | 0xDB..=0xDF
+            | 0xE2
+    )
+}
+
+/// Whether binding `spec` takes its key away from typing: a key that types
+/// text (vk_types_text), bare or with Shift only. RegisterHotKey takes the
+/// combo system-wide, so the key then types in no app.
+pub fn blocks_typing(spec: HotkeySpec) -> bool {
+    spec.mods & (MOD_CONTROL.0 | MOD_ALT.0 | MOD_WIN.0) == 0 && vk_types_text(spec.vk)
+}
+
 /// Which configured hotkeys failed to register (already taken by another app).
 /// A field is only `true` when that hotkey was requested AND `RegisterHotKey`
 /// failed — so the caller can warn the user about a genuine conflict.
@@ -257,5 +282,35 @@ mod tests {
         assert!(!text.contains("Open settings"), "{text}");
         // A failed flag without a combo has nothing to list.
         assert_eq!(conflict_message(None, settings, &toggle_failed), None);
+    }
+
+    #[test]
+    fn typing_keys() {
+        // Backspace, Tab, Enter, A, Z, 0, 9 and Space.
+        let plain = [0x08, 0x09, 0x0D, 0x41, 0x5A, 0x30, 0x39, 0x20];
+        // The OEM keys [ ] ; and `, the numpad's 0 and /, and the extra key of
+        // 102-key keyboards.
+        let more = [0xDB, 0xDD, 0xBA, 0xC0, 0x60, 0x6F, 0xE2];
+        for vk in plain.into_iter().chain(more) {
+            assert!(vk_types_text(vk), "{vk:#04X}");
+        }
+        // F1, F24, Left, Home, Delete, Insert, Pause, Volume Mute, Play/Pause,
+        // Apps and Num Lock type nothing.
+        for vk in [0x70, 0x87, 0x25, 0x24, 0x2E, 0x2D, 0x13, 0xAD, 0xB3, 0x5D, 0x90] {
+            assert!(!vk_types_text(vk), "{vk:#04X}");
+        }
+    }
+
+    #[test]
+    fn bare_or_shift_typing_keys_block_typing() {
+        let key = |mods: u32, vk: u32| HotkeySpec { mods, vk };
+        // A bare "]", and Shift with "[" (which types "{").
+        assert!(blocks_typing(key(0, 0xDD)));
+        assert!(blocks_typing(key(MOD_SHIFT.0, 0xDB)));
+        // Ctrl, Alt or Win make a shortcut of the key; F8 and Left type nothing.
+        let (ctrl, alt, win) = (MOD_CONTROL.0, MOD_ALT.0, MOD_WIN.0);
+        for spec in [key(ctrl, 0xDD), key(alt, 0x54), key(win, 0x54), key(0, 0x77), key(0, 0x25)] {
+            assert!(!blocks_typing(spec), "{spec:?}");
+        }
     }
 }

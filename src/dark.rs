@@ -43,8 +43,11 @@ pub const PANEL_BG: u32 = rgb(0x26, 0x28, 0x2E);
 pub const EDIT_BG: u32 = rgb(0x16, 0x18, 0x1C);
 /// Primary foreground text on the dark surfaces.
 pub const TEXT: u32 = rgb(0xE8, 0xEA, 0xED);
-/// Secondary / muted text (section titles, the opacity readout).
+/// Secondary / muted text (section titles, a hotkey field's Win note).
 pub const TEXT_MUTED: u32 = rgb(0x9A, 0xA0, 0xA6);
+/// Amber warning text on a card (the hotkey notes that warn): 7.5:1 on
+/// PANEL_BG.
+pub const WARN: u32 = rgb(0xE8, 0xB0, 0x4A);
 
 // Owner-draw palette for the controls Win10 refuses to theme dark itself
 // (push buttons, the trackbar, check glyphs). All COLORREF = 0x00BBGGRR.

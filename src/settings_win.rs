@@ -59,7 +59,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::config::Config;
 use crate::dark;
 use crate::dpi::{dpi_for_window, Scale};
-use crate::hotkeys::{format_hotkey, HotkeySpec};
+use crate::hotkeys::{blocks_typing, format_hotkey, HotkeySpec};
 use crate::placement::{fit_into, work_area_near};
 use crate::registry::{sample_rows, MetricKey};
 use crate::render::{render_rows, win_w, window_height, LIGHT, THEME};
@@ -95,11 +95,17 @@ const IDC_LBL_INTERVAL: i32 = 1022;
 const IDC_LBL_FONT: i32 = 1023;
 const IDC_LBL_HK_TOGGLE: i32 = 1024;
 const IDC_LBL_HK_SETTINGS: i32 = 1025;
+// The notes on the hotkey labels' rows (hotkey_notes).
+const IDC_HK_TOGGLE_NOTE: i32 = 1026;
+const IDC_HK_SETTINGS_NOTE: i32 = 1027;
 const EN_CHANGE: u32 = 0x0300;
 /// SS_ENDELLIPSIS: a static's text that does not fit ends in an ellipsis on
 /// its one line, instead of wrapping onto a second line that its height clips
 /// (the windows crate has it only under a feature TinyMon does not enable).
 const SS_ENDELLIPSIS: u32 = 0x4000;
+/// SS_RIGHT: a static's text aligns right (a local constant for the same
+/// reason).
+const SS_RIGHT: u32 = 0x0002;
 
 /// The interval and font labels. They state the ranges apply() clamps to, as
 /// literals (range_labels_match_the_clamp_constants keeps them in step).
@@ -289,11 +295,14 @@ fn control_places(n: i32) -> Vec<Place> {
         at(IDC_INTERVAL, 196, a + 78, 62, 22),
         at(IDC_LBL_FONT, 22, a + 108, 172, 18),
         at(IDC_FONT, 196, a + 106, 62, 22),
-        // Hotkeys: each capture field has a Clear button.
-        at(IDC_LBL_HK_TOGGLE, 22, k + 20, 160, 18),
+        // Hotkeys: each capture field has a Clear button, and a note at the
+        // right end of its label's row.
+        at(IDC_LBL_HK_TOGGLE, 22, k + 20, 78, 18),
+        at(IDC_HK_TOGGLE_NOTE, 102, k + 20, 154, 18),
         at(IDC_HK_TOGGLE, 22, k + 38, 170, 22),
         at(IDC_HK_TOGGLE_CLR, 200, k + 38, 56, 22),
-        at(IDC_LBL_HK_SETTINGS, 22, k + 66, 160, 18),
+        at(IDC_LBL_HK_SETTINGS, 22, k + 66, 78, 18),
+        at(IDC_HK_SETTINGS_NOTE, 102, k + 66, 154, 18),
         at(IDC_HK_SETTINGS, 22, k + 84, 170, 22),
         at(IDC_HK_SETTINGS_CLR, 200, k + 84, 56, 22),
         // The buttons, below the cards.
@@ -309,7 +318,7 @@ fn control_places(n: i32) -> Vec<Place> {
 
 /// The controls build_controls creates after the metric rows, in creation
 /// order, which is also the Tab order.
-const CREATION_ORDER: [i32; 17] = [
+const CREATION_ORDER: [i32; 19] = [
     IDC_OPACITY_VAL,
     IDC_OPACITY,
     IDC_LBL_INTERVAL,
@@ -317,9 +326,11 @@ const CREATION_ORDER: [i32; 17] = [
     IDC_LBL_FONT,
     IDC_FONT,
     IDC_LBL_HK_TOGGLE,
+    IDC_HK_TOGGLE_NOTE,
     IDC_HK_TOGGLE,
     IDC_HK_TOGGLE_CLR,
     IDC_LBL_HK_SETTINGS,
+    IDC_HK_SETTINGS_NOTE,
     IDC_HK_SETTINGS,
     IDC_HK_SETTINGS_CLR,
     IDC_RESET,
@@ -594,10 +605,19 @@ unsafe extern "system" fn settings_proc(
                     reset_to_defaults(hwnd);
                     refresh_preview(hwnd);
                 }
-                IDC_HK_TOGGLE_CLR => clear_hotkey(hwnd, IDC_HK_TOGGLE),
-                IDC_HK_SETTINGS_CLR => clear_hotkey(hwnd, IDC_HK_SETTINGS),
+                IDC_HK_TOGGLE_CLR => {
+                    clear_hotkey(hwnd, IDC_HK_TOGGLE);
+                    refresh_hotkey_notes(hwnd);
+                }
+                IDC_HK_SETTINGS_CLR => {
+                    clear_hotkey(hwnd, IDC_HK_SETTINGS);
+                    refresh_hotkey_notes(hwnd);
+                }
                 // Live-preview triggers: the font edit changed, or a metric toggled.
                 IDC_FONT if notif == EN_CHANGE => refresh_preview(hwnd),
+                // A hotkey field changed, typed or filled by
+                // capture_fired_hotkey: the notes follow it.
+                IDC_HK_TOGGLE | IDC_HK_SETTINGS if notif == EN_CHANGE => refresh_hotkey_notes(hwnd),
                 _ if (IDC_METRIC_BASE..IDC_METRIC_BASE + n).contains(&id) => {
                     // Toggle this row's metric on/off in the working list.
                     let p = (id - IDC_METRIC_BASE) as usize;
@@ -652,10 +672,11 @@ unsafe extern "system" fn settings_proc(
 
         // Dark theming for control text/background. Static labels (and the
         // trackbar's backfill) sit ON a card, so they take the card surface;
-        // edit + hotkey fields get the recessed input fill.
+        // edit + hotkey fields get the recessed input fill. A hotkey note's
+        // text takes its kind's colour (static_text_color).
         WM_CTLCOLORSTATIC => {
             let hdc = HDC(wparam.0 as *mut c_void);
-            SetTextColor(hdc, COLORREF(dark::TEXT));
+            SetTextColor(hdc, COLORREF(static_text_color(HWND(lparam.0 as *mut c_void))));
             SetBkColor(hdc, COLORREF(dark::PANEL_BG));
             LRESULT(dark::panel_brush().0 as isize)
         }
@@ -740,6 +761,10 @@ unsafe fn build_controls(hwnd: HWND, main: HWND) {
             IDC_FONT => (w!("EDIT"), font_text.as_str(), number),
             IDC_LBL_HK_TOGGLE => (w!("STATIC"), "Show / Hide", base),
             IDC_LBL_HK_SETTINGS => (w!("STATIC"), "Open settings", base),
+            // The notes beside them, right-aligned (refresh_hotkey_notes).
+            IDC_HK_TOGGLE_NOTE | IDC_HK_SETTINGS_NOTE => {
+                (w!("STATIC"), "", base | SS_RIGHT | SS_ENDELLIPSIS)
+            }
             IDC_HK_TOGGLE | IDC_HK_SETTINGS => (w!("msctls_hotkey32"), "", field),
             IDC_HK_TOGGLE_CLR | IDC_HK_SETTINGS_CLR => (w!("BUTTON"), "Clear", btn),
             // OK is the primary. NB: BS_DEFPUSHBUTTON can't coexist with
@@ -778,6 +803,7 @@ unsafe fn build_controls(hwnd: HWND, main: HWND) {
         }
     }
     render_metric_rows(hwnd);
+    refresh_hotkey_notes(hwnd);
 
     // Start focus on the first checkbox so Tab has somewhere to go; seed preview.
     if let Ok(c) = GetDlgItem(Some(hwnd), IDC_METRIC_BASE) {
@@ -831,6 +857,7 @@ unsafe fn reset_to_defaults(hwnd: HWND) {
     }
     clear_hotkey(hwnd, IDC_HK_TOGGLE);
     clear_hotkey(hwnd, IDC_HK_SETTINGS);
+    refresh_hotkey_notes(hwnd);
 }
 
 /// Window procedure for the live-preview child window.
@@ -1353,6 +1380,37 @@ pub unsafe fn capture_fired_hotkey(settings: HWND, lparam: LPARAM) -> bool {
     true
 }
 
+/// Show each hotkey field's note (hotkey_notes, against the saved combos) in
+/// the static on its label's row, and keep the note's kind in that static's
+/// GWLP_USERDATA (0 for none), which WM_CTLCOLORSTATIC colours it by.
+unsafe fn refresh_hotkey_notes(hwnd: HWND) {
+    let main = HWND(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut c_void);
+    let cur = current_settings(main);
+    let fields = [read_hotkey(hwnd, IDC_HK_TOGGLE), read_hotkey(hwnd, IDC_HK_SETTINGS)];
+    let notes = hotkey_notes(fields, [cur.hotkey_toggle, cur.hotkey_settings]);
+    for (id, note) in [IDC_HK_TOGGLE_NOTE, IDC_HK_SETTINGS_NOTE].into_iter().zip(notes) {
+        if let Ok(st) = GetDlgItem(Some(hwnd), id) {
+            SetWindowLongPtrW(st, GWLP_USERDATA, note.map_or(0, |n| n as isize));
+            set_text(st, note.map_or("", HotkeyNote::text));
+        }
+    }
+}
+
+/// The text colour of static `ctl`: a hotkey note's by the kind it keeps in
+/// GWLP_USERDATA (amber for a warning, muted for the Win note); every other
+/// static's, and a note's with nothing to say, dark::TEXT.
+unsafe fn static_text_color(ctl: HWND) -> u32 {
+    let id = GetDlgCtrlID(ctl);
+    if id != IDC_HK_TOGGLE_NOTE && id != IDC_HK_SETTINGS_NOTE {
+        return dark::TEXT;
+    }
+    match HotkeyNote::from_code(GetWindowLongPtrW(ctl, GWLP_USERDATA)) {
+        Some(note) if note.is_warning() => dark::WARN,
+        Some(_) => dark::TEXT_MUTED,
+        None => dark::TEXT,
+    }
+}
+
 /// Map RegisterHotKey MOD_* bits to the hotkey control's HOTKEYF_* bits.
 fn mods_to_hotkeyf(mods: u32) -> u32 {
     let mut hf = 0;
@@ -1422,6 +1480,60 @@ fn effective_hotkey(saved: Option<HotkeySpec>, field: Option<HotkeySpec>) -> Opt
         }
     }
     field
+}
+
+/// A note at the right end of a hotkey field's label row (hotkey_notes). Its
+/// value is the code the note's static keeps in GWLP_USERDATA (0: no note).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HotkeyNote {
+    /// The combo is a key that types text, bare or with Shift only: once
+    /// registered, it no longer types in any app (hotkeys::blocks_typing).
+    BlocksTyping = 1,
+    /// The combo has Win, which the field cannot show (set in the config).
+    PlusWin = 2,
+}
+
+impl HotkeyNote {
+    /// Every note, for from_code.
+    const ALL: [HotkeyNote; 2] = [HotkeyNote::BlocksTyping, HotkeyNote::PlusWin];
+
+    fn text(self) -> &'static str {
+        match self {
+            HotkeyNote::BlocksTyping => "Blocks typing this key",
+            HotkeyNote::PlusWin => "+ Win (set in config)",
+        }
+    }
+
+    /// A warning shows amber (dark::WARN), any other note muted.
+    fn is_warning(self) -> bool {
+        self == HotkeyNote::BlocksTyping
+    }
+
+    /// The note whose code a note's static keeps (None for 0, or any other).
+    fn from_code(code: isize) -> Option<HotkeyNote> {
+        HotkeyNote::ALL.into_iter().find(|n| *n as isize == code)
+    }
+}
+
+/// The notes for the Show / Hide and Open settings fields, from what the
+/// `fields` read and the `saved` combos, judged on the combo Apply would save
+/// for each (effective_hotkey): a key that types text, bare or with Shift
+/// only, blocks typing it; a combo with Win gets the Win the field cannot show.
+fn hotkey_notes(
+    fields: [Option<HotkeySpec>; 2],
+    saved: [Option<HotkeySpec>; 2],
+) -> [Option<HotkeyNote>; 2] {
+    let note = |i: usize| {
+        let spec = effective_hotkey(saved[i], fields[i])?;
+        if blocks_typing(spec) {
+            Some(HotkeyNote::BlocksTyping)
+        } else if spec.mods & MOD_WIN.0 != 0 {
+            Some(HotkeyNote::PlusWin)
+        } else {
+            None
+        }
+    };
+    [note(0), note(1)]
 }
 
 /// Where the message loop sends a message while the settings window is open
@@ -1708,9 +1820,11 @@ mod tests {
             ];
             let hotkeys = [
                 IDC_LBL_HK_TOGGLE,
+                IDC_HK_TOGGLE_NOTE,
                 IDC_HK_TOGGLE,
                 IDC_HK_TOGGLE_CLR,
                 IDC_LBL_HK_SETTINGS,
+                IDC_HK_SETTINGS_NOTE,
                 IDC_HK_SETTINGS,
                 IDC_HK_SETTINGS_CLR,
             ];
@@ -1826,5 +1940,38 @@ mod tests {
         // EM_LIMITTEXT: each edit takes exactly the digits of its top value.
         assert_eq!(MAX_INTERVAL_MS.to_string().len(), INTERVAL_CHARS);
         assert_eq!(MAX_FONT_PX.to_string().len(), FONT_CHARS);
+    }
+
+    #[test]
+    fn owner_brackets_and_win_get_notes() {
+        use HotkeyNote::{BlocksTyping, PlusWin};
+        let key = |mods: u32, vk: u32| Some(HotkeySpec { mods, vk });
+        // The owner's bare "]" (Show / Hide) and "[" (Open settings), saved
+        // and in the fields: both keys no longer type anywhere.
+        let brackets = [key(0, 0xDD), key(0, 0xDB)];
+        assert_eq!(hotkey_notes(brackets, brackets), [Some(BlocksTyping), Some(BlocksTyping)]);
+        // A saved Win+T, which the field shows as T: the note adds the Win.
+        let win_t = [key(MOD_WIN.0, 0x54), None];
+        assert_eq!(hotkey_notes([key(0, 0x54), None], win_t), [Some(PlusWin), None]);
+        // A shortcut and a key that types nothing: no notes.
+        let quiet = [key(MOD_CONTROL.0 | MOD_ALT.0, 0x4D), key(0, 0x77)];
+        assert_eq!(hotkey_notes(quiet, quiet), [None, None]);
+        // Shift and a typing key still type: a note.
+        let shifted = [key(MOD_SHIFT.0, 0xDB), key(0, 0x77)];
+        assert_eq!(hotkey_notes(shifted, shifted), [Some(BlocksTyping), None]);
+    }
+
+    #[test]
+    fn notes_follow_the_combo_apply_would_save() {
+        let key = |mods: u32, vk: u32| Some(HotkeySpec { mods, vk });
+        // The saved Win+T's field now reads Ctrl+T: Apply saves Ctrl+T, so
+        // the Win note goes.
+        let win_t = [key(MOD_WIN.0, 0x54), None];
+        assert_eq!(hotkey_notes([key(MOD_CONTROL.0, 0x54), None], win_t), [None, None]);
+        // A saved "]" whose field was cleared: Apply unbinds it, so no note;
+        // a "]" typed into a field that was empty: a note at once.
+        assert_eq!(hotkey_notes([None, None], [key(0, 0xDD), None]), [None, None]);
+        let typed = hotkey_notes([None, key(0, 0xDD)], [None, None]);
+        assert_eq!(typed, [None, Some(HotkeyNote::BlocksTyping)]);
     }
 }
