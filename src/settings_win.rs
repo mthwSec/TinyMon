@@ -47,12 +47,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextW, IsChild, LoadCursorW, LoadIconW,
     PostMessageW, RegisterClassW, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     BN_DOUBLECLICKED, BS_OWNERDRAW, CREATESTRUCTW, CW_USEDEFAULT, DC_HASDEFID, DM_GETDEFID,
-    ES_NUMBER, GWLP_USERDATA, HMENU, IDC_ARROW, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WA_INACTIVE,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
-    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_GETFONT,
-    WM_HSCROLL, WM_KEYDOWN, WM_KEYUP, WM_NOTIFY, WM_PAINT, WM_SETFOCUS, WM_SETFONT, WM_SETTEXT,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_OVERLAPPED,
-    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    ES_NUMBER, GWLP_USERDATA, HMENU, IDC_ARROW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW,
+    WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
+    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
+    WM_GETFONT, WM_HSCROLL, WM_KEYDOWN, WM_KEYUP, WM_NOTIFY, WM_PAINT, WM_SETFOCUS, WM_SETFONT,
+    WM_SETTEXT, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD,
+    WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::config::Config;
@@ -97,12 +97,14 @@ const IDC_LBL_HK_SETTINGS: i32 = 1025;
 const EN_CHANGE: u32 = 0x0300;
 
 thread_local! {
-    /// The settings window's DPI (96 = 100%), set in `build_controls`. Every
-    /// coordinate/size/font goes through `dscale()` so the window scales on
-    /// high-DPI displays (the layout is authored in logical 96-dpi units).
+    /// The settings window's DPI (96 = 100%), set in `build_controls` and again
+    /// on WM_DPICHANGED. Every coordinate/size/font goes through `dscale()` so
+    /// the window scales on high-DPI displays (the layout is authored in
+    /// logical 96-dpi units).
     static SCALE: Cell<u32> = const { Cell::new(96) };
     /// The settings window's Segoe UI fonts — regular for controls, semibold for
-    /// section titles. Built per-open at the window's DPI; freed on close.
+    /// section titles. Built per-open at the window's DPI and again on a DPI
+    /// change; freed on close.
     static UI_FONT: Cell<isize> = const { Cell::new(0) };
     static HDR_FONT: Cell<isize> = const { Cell::new(0) };
     /// The working metric list: every metric in display order, each with its
@@ -113,7 +115,7 @@ thread_local! {
     static LAST_FOCUS: Cell<i32> = const { Cell::new(0) };
 }
 
-/// The settings window's current DPI scale (set in `build_controls`).
+/// The settings window's current DPI scale (SCALE).
 fn dscale() -> Scale {
     Scale(SCALE.with(|c| c.get()))
 }
@@ -165,11 +167,14 @@ unsafe fn create_ui_font(px: i32, weight: i32) -> HFONT {
     CreateFontIndirectW(&lf)
 }
 
-/// (Re)create the cached UI fonts (at the current DPI scale).
-unsafe fn make_fonts() {
-    free_fonts();
-    UI_FONT.with(|c| c.set(create_ui_font(12, 400).0 as isize));
-    HDR_FONT.with(|c| c.set(create_ui_font(12, 600).0 as isize));
+/// Create the cached UI fonts at the current DPI scale. Returns the fonts they
+/// replace (0 where there was none), for the caller to free with
+/// `delete_fonts` once no control uses them any more.
+unsafe fn make_fonts() -> [isize; 2] {
+    [
+        UI_FONT.with(|c| c.replace(create_ui_font(12, 400).0 as isize)),
+        HDR_FONT.with(|c| c.replace(create_ui_font(12, 600).0 as isize)),
+    ]
 }
 
 /// The regular control font (null until `make_fonts`).
@@ -180,15 +185,17 @@ unsafe fn ui_font() -> HFONT {
 unsafe fn hdr_font() -> HFONT {
     HFONT(HDR_FONT.with(|c| c.get()) as *mut c_void)
 }
-/// Delete the cached fonts (on settings-window close).
-unsafe fn free_fonts() {
-    for cell in [&UI_FONT, &HDR_FONT] {
-        let h = cell.with(|c| c.get());
+/// Delete fonts given by their raw handles (0 = none).
+unsafe fn delete_fonts(fonts: [isize; 2]) {
+    for h in fonts {
         if h != 0 {
             let _ = DeleteObject(HGDIOBJ(h as *mut c_void));
-            cell.with(|c| c.set(0));
         }
     }
+}
+/// Delete the cached fonts (on settings-window close).
+unsafe fn free_fonts() {
+    delete_fonts([UI_FONT.with(|c| c.replace(0)), HDR_FONT.with(|c| c.replace(0))]);
 }
 
 const CLIENT_W: i32 = 280; // left controls column
@@ -234,6 +241,13 @@ struct Place {
     y: i32,
     w: i32,
     h: i32,
+}
+
+impl Place {
+    /// This Place in device pixels at scale `s`: (x, y, w, h).
+    fn scaled(self, s: Scale) -> (i32, i32, i32, i32) {
+        (s.px(self.x), s.px(self.y), s.px(self.w), s.px(self.h))
+    }
 }
 
 /// Where each child control goes with `n` metric rows (callers pass
@@ -317,6 +331,23 @@ fn frame_size(dpi: u32) -> (i32, i32) {
     (r.right - r.left, r.bottom - r.top)
 }
 
+/// The settings window's size at scale `s`: its client area (with every
+/// metric row) plus its frame.
+fn window_size(s: Scale) -> (i32, i32) {
+    let (fw, fh) = frame_size(s.0);
+    let client_h = layout(MetricKey::ALL.len() as i32).client_h;
+    (s.px(CLIENT_W_TOTAL) + fw, s.px(client_h) + fh)
+}
+
+/// The DPI a WM_DPICHANGED reports in `wparam`: the low word (the high word
+/// repeats it), with 0 read as 96.
+fn dpi_from_wparam(wparam: WPARAM) -> u32 {
+    match (wparam.0 & 0xFFFF) as u32 {
+        0 => 96,
+        dpi => dpi,
+    }
+}
+
 /// Register the settings window class + init common controls (once at startup).
 pub unsafe fn register_class(hinstance: HINSTANCE) {
     let icc = INITCOMMONCONTROLSEX {
@@ -378,9 +409,7 @@ pub unsafe fn open(main: HWND) -> HWND {
         // WM_CREATE) plus the frame, moved from the default spot only as far
         // as it takes to fit the work area of the nearest monitor (a window
         // taller than the work area keeps its top edge inside it).
-        let s = dscale();
-        let (fw, fh) = frame_size(s.0);
-        let (w, h) = (s.px(CLIENT_W_TOTAL) + fw, s.px(lay.client_h) + fh);
+        let (w, h) = window_size(dscale());
         let mut r = RECT::default();
         let _ = GetWindowRect(hwnd, &mut r);
         r.right = r.left + w;
@@ -455,6 +484,30 @@ unsafe extern "system" fn settings_proc(
                 if cs.is_null() { HWND(core::ptr::null_mut()) } else { HWND((*cs).lpCreateParams) };
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, main.0 as isize);
             build_controls(hwnd, main);
+            LRESULT(0)
+        }
+
+        // The window moved to a monitor with another scale, or its monitor's
+        // scale changed. The new fonts come first; place_controls moves every
+        // control to its Place at the new scale and hands it the new font, and
+        // only then are the old fonts freed, which the controls used until
+        // then. The window then takes its size at the new DPI, at the top-left
+        // of the rect Windows suggests (lParam), or where it is without one.
+        WM_DPICHANGED => {
+            SCALE.with(|c| c.set(dpi_from_wparam(wparam)));
+            let old = make_fonts();
+            place_controls(hwnd);
+            delete_fonts(old);
+            let (w, h) = window_size(dscale());
+            // SAFETY: a non-null lParam of WM_DPICHANGED points to the suggested
+            // window RECT, valid while the message is handled; as_ref reads
+            // nothing from a null one.
+            let (x, y, flags) = match (lparam.0 as *const RECT).as_ref() {
+                Some(r) => (r.left, r.top, SWP_NOZORDER | SWP_NOACTIVATE),
+                None => (0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE),
+            };
+            let _ = SetWindowPos(hwnd, None, x, y, w, h, flags);
+            let _ = InvalidateRect(Some(hwnd), None, true);
             LRESULT(0)
         }
 
@@ -632,7 +685,7 @@ unsafe extern "system" fn settings_proc(
 unsafe fn build_controls(hwnd: HWND, main: HWND) {
     let hinstance = HINSTANCE(GetModuleHandleW(None).map(|h| h.0).unwrap_or(core::ptr::null_mut()));
     SCALE.with(|c| c.set(dpi_for_window(hwnd)));
-    make_fonts();
+    delete_fonts(make_fonts());
     let font = HGDIOBJ(ui_font().0);
     let cur = current_settings(main);
     let n = MetricKey::ALL.len() as i32;
@@ -643,7 +696,7 @@ unsafe fn build_controls(hwnd: HWND, main: HWND) {
     let s = dscale();
     let child = |class, text, style: u32, id| unsafe {
         let p = places.iter().find(|p| p.id == id).copied().unwrap_or_default();
-        let (x, y, w, h) = (s.px(p.x), s.px(p.y), s.px(p.w), s.px(p.h));
+        let (x, y, w, h) = p.scaled(s);
         control(hwnd, class, text, WINDOW_STYLE(style), x, y, w, h, id, hinstance, font)
     };
     let base = WS_CHILD.0 | WS_VISIBLE.0;
@@ -709,6 +762,21 @@ unsafe fn build_controls(hwnd: HWND, main: HWND) {
         let _ = SetFocus(Some(c));
     }
     refresh_preview(hwnd);
+}
+
+/// After a DPI change: move every control to its Place at the current scale
+/// and hand it the current UI font (build_controls places each control as it
+/// creates it).
+unsafe fn place_controls(hwnd: HWND) {
+    let s = dscale();
+    let font = WPARAM(ui_font().0 as usize);
+    for p in control_places(MetricKey::ALL.len() as i32) {
+        if let Ok(c) = GetDlgItem(Some(hwnd), p.id) {
+            let (x, y, w, h) = p.scaled(s);
+            let _ = SetWindowPos(c, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+            SendMessageW(c, WM_SETFONT, Some(font), Some(LPARAM(1)));
+        }
+    }
 }
 
 /// Invalidate the live-preview child so it repaints from the current controls.
@@ -1589,5 +1657,23 @@ mod tests {
         // least to fit, as open() moves it with placement::fit_into.
         let left = RECT { left: -1920, top: -39, right: 0, bottom: 1041 };
         assert_eq!(fit_into(-100, 900, 562, 605, left), (-562, 436));
+    }
+
+    #[test]
+    fn dpi_change_reads_the_new_dpi_and_scales_the_places() {
+        // WM_DPICHANGED's wParam holds the new DPI in both words; the low word
+        // counts, and 0, which would shrink every control to nothing, is 96.
+        assert_eq!(dpi_from_wparam(WPARAM(0x0078_0078)), 120);
+        assert_eq!(dpi_from_wparam(WPARAM(0)), 96);
+        // place_controls moves each control to its Place at the new scale: at
+        // 96 dpi the Place itself, and at 120 dpi OK (all 10 metrics) lands
+        // where spec 8.5's manual check expects it, client (130, 670), 65 x 33.
+        for n in [9, 10] {
+            for p in control_places(n) {
+                assert_eq!(p.scaled(Scale(96)), (p.x, p.y, p.w, p.h), "{p:?}");
+            }
+        }
+        let ok = control_places(10).into_iter().find(|p| p.id == IDOK).expect("OK");
+        assert_eq!(ok.scaled(Scale(120)), (130, 670, 65, 33));
     }
 }
