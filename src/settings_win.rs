@@ -43,14 +43,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetDlgCtrlID, GetDlgItem,
-    GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextW, IsChild, PostMessageW,
-    RegisterClassW, SendMessageW, SetWindowLongPtrW, SetWindowPos, BN_DOUBLECLICKED, BS_OWNERDRAW,
-    CREATESTRUCTW, CW_USEDEFAULT, DC_HASDEFID, DM_GETDEFID, ES_NUMBER, GWLP_USERDATA, HMENU,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_ACTIVATE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
-    WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_GETFONT, WM_HSCROLL, WM_KEYDOWN, WM_KEYUP,
-    WM_NOTIFY, WM_PAINT, WM_SETFOCUS, WM_SETFONT, WM_SETTEXT, WM_SYSKEYDOWN, WM_SYSKEYUP,
-    WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextW, IsChild, LoadCursorW, LoadIconW,
+    PostMessageW, RegisterClassW, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    BN_DOUBLECLICKED, BS_OWNERDRAW, CREATESTRUCTW, CW_USEDEFAULT, DC_HASDEFID, DM_GETDEFID,
+    ES_NUMBER, GWLP_USERDATA, HMENU, IDC_ARROW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW,
+    WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
+    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_GETFONT,
+    WM_HSCROLL, WM_KEYDOWN, WM_KEYUP, WM_NOTIFY, WM_PAINT, WM_SETFOCUS, WM_SETFONT, WM_SETTEXT,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_OVERLAPPED,
+    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::config::Config;
@@ -222,9 +223,16 @@ pub unsafe fn register_class(hinstance: HINSTANCE) {
         dwICC: ICC_BAR_CLASSES | ICC_HOTKEY_CLASS | ICC_STANDARD_CLASSES,
     };
     let _ = InitCommonControlsEx(&icc);
+    // Both classes get the arrow cursor: without a class cursor the pointer
+    // keeps whatever shape it last had (an edit's I-beam, say) over the cards
+    // and the preview. The caption shows icon resource 1, the embedded
+    // icon.ico.
+    let arrow = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
     let wc = WNDCLASSW {
         lpfnWndProc: Some(settings_proc),
         hInstance: hinstance,
+        hIcon: LoadIconW(Some(hinstance), PCWSTR(1 as _)).unwrap_or_default(),
+        hCursor: arrow,
         lpszClassName: CLASS,
         hbrBackground: dark::bg_brush(),
         ..Default::default()
@@ -234,6 +242,7 @@ pub unsafe fn register_class(hinstance: HINSTANCE) {
     let pwc = WNDCLASSW {
         lpfnWndProc: Some(preview_proc),
         hInstance: hinstance,
+        hCursor: arrow,
         lpszClassName: PREVIEW_CLASS,
         ..Default::default()
     };
@@ -244,11 +253,14 @@ pub unsafe fn register_class(hinstance: HINSTANCE) {
 pub unsafe fn open(main: HWND) -> HWND {
     let hinstance = HINSTANCE(GetModuleHandleW(None).map(|h| h.0).unwrap_or(core::ptr::null_mut()));
     let lay = layout();
+    // Created hidden, then sized and given its dark frame, and only then
+    // shown: Windows 10 does not redraw a shown caption when the dark
+    // attribute arrives, so a window shown first would keep a light caption.
     let hwnd = CreateWindowExW(
         WINDOW_EX_STYLE(0),
         CLASS,
         w!("TinyMon Settings"),
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         CLIENT_W_TOTAL,
@@ -281,8 +293,9 @@ pub unsafe fn open(main: HWND) -> HWND {
             );
         }
         // Dark title bar + dark mode for the frame (controls are themed in
-        // `control`). Done after sizing so the frame repaints once.
+        // `control`), then the first show.
         dark::apply_window(hwnd);
+        let _ = ShowWindow(hwnd, SW_SHOW);
     }
     hwnd
 }
@@ -375,12 +388,16 @@ unsafe extern "system" fn settings_proc(
         }
 
         // Opacity trackbar moved: reflect the live value + update the preview.
+        // The trackbar itself redraws only the thumb's old and new spots, so
+        // after a jump (a key, a click on the channel) the accent fill between
+        // them would be stale: repaint all of it.
         WM_HSCROLL => {
             if let Ok(tb) = GetDlgItem(Some(hwnd), IDC_OPACITY) {
                 let pos = SendMessageW(tb, TBM_GETPOS, None, None).0;
                 if let Ok(lbl) = GetDlgItem(Some(hwnd), IDC_OPACITY_VAL) {
                     set_text(lbl, &format!("Opacity   {}", pos));
                 }
+                let _ = InvalidateRect(Some(tb), None, false);
             }
             refresh_preview(hwnd);
             LRESULT(0)
@@ -655,6 +672,9 @@ unsafe fn reset_to_defaults(hwnd: HWND) {
     render_metric_rows(hwnd);
     if let Ok(tb) = GetDlgItem(Some(hwnd), IDC_OPACITY) {
         SendMessageW(tb, TBM_SETPOS, Some(WPARAM(1)), Some(LPARAM(d.opacity as isize)));
+        // TBM_SETPOS redraws only the thumb's old and new spots: repaint the
+        // whole trackbar, or the accent fill between them stays stale.
+        let _ = InvalidateRect(Some(tb), None, false);
     }
     if let Ok(lbl) = GetDlgItem(Some(hwnd), IDC_OPACITY_VAL) {
         set_text(lbl, &format!("Opacity   {}", d.opacity));
