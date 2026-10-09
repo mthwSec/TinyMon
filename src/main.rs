@@ -460,7 +460,8 @@ fn main() -> Result<()> {
         while GetMessageW(&mut msg, None, 0, 0).into() {
             // When the settings window is open, give it first crack at the
             // message so dialog keyboard navigation works (Tab between fields,
-            // Enter = OK, Esc = Cancel, Space toggles a checkbox, mnemonics).
+            // Enter presses the focused button or OK, Esc = Cancel, Space
+            // toggles a checkbox).
             let sh = {
                 let p = state_ptr(hwnd);
                 if p.is_null() {
@@ -483,7 +484,7 @@ fn main() -> Result<()> {
                             || msg.wParam.0 as u16 == VK_RETURN.0
                             || msg.wParam.0 as u16 == VK_ESCAPE.0));
                 if !capturing {
-                    // Dialog keyboard nav (Tab/Enter/Space/mnemonics) for settings.
+                    // Dialog keyboard nav (Tab/Enter/Esc/Space) for settings.
                     if IsDialogMessageW(sh, &msg).as_bool() {
                         continue;
                     }

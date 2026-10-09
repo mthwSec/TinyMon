@@ -8,10 +8,12 @@
 //! a bare `WM_APP_APPLY`. Closing posts `WM_APP_SETTINGS_CLOSED` (it never quits
 //! the app).
 //!
-//! Keyboard navigation (Tab between fields, Enter = OK, Esc = Cancel, Space to
-//! toggle a checkbox, mnemonics) is provided by `IsDialogMessageW` in the main
-//! message loop — which is why the OK / Cancel buttons use the standard
-//! `IDOK` / `IDCANCEL` ids that loop maps Enter / Esc onto.
+//! Keyboard navigation (Tab between fields, Esc = Cancel, Space toggles a
+//! checkbox or presses a button, Enter presses the focused push button and
+//! means OK anywhere else) is provided by `IsDialogMessageW` in the main
+//! message loop. OK and Cancel use the standard `IDOK` / `IDCANCEL` ids for it:
+//! Esc sends IDCANCEL, and Enter sends the id this window gives for
+//! `DM_GETDEFID` (`enter_target`).
 
 use core::ffi::c_void;
 use core::mem::size_of;
@@ -35,16 +37,18 @@ use windows::Win32::UI::Controls::{
     ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, NMCUSTOMDRAW, NMHDR, ODS_DEFAULT, ODS_FOCUS,
     ODS_SELECTED, TBM_SETPOS, TBM_SETRANGE,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, MOD_ALT, MOD_CONTROL, MOD_SHIFT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetFocus, SetFocus, MOD_ALT, MOD_CONTROL, MOD_SHIFT,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetDlgItem, GetParent,
-    GetWindowLongPtrW, GetWindowRect, GetWindowTextW, PostMessageW, RegisterClassW, SendMessageW,
-    SetWindowLongPtrW, SetWindowPos, BS_OWNERDRAW, CREATESTRUCTW, CW_USEDEFAULT, ES_NUMBER,
-    GWLP_USERDATA, HMENU, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DRAWITEM, WM_ERASEBKGND, WM_GETFONT, WM_HSCROLL, WM_NOTIFY, WM_PAINT, WM_SETFOCUS,
-    WM_SETFONT, WM_SETTEXT, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_OVERLAPPED, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetDlgCtrlID, GetDlgItem,
+    GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextW, IsChild, PostMessageW,
+    RegisterClassW, SendMessageW, SetWindowLongPtrW, SetWindowPos, BS_OWNERDRAW, CREATESTRUCTW,
+    CW_USEDEFAULT, DC_HASDEFID, DM_GETDEFID, ES_NUMBER, GWLP_USERDATA, HMENU, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOZORDER, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
+    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_GETFONT,
+    WM_HSCROLL, WM_NOTIFY, WM_PAINT, WM_SETFOCUS, WM_SETFONT, WM_SETTEXT, WNDCLASSW, WS_BORDER,
+    WS_CAPTION, WS_CHILD, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::config::Config;
@@ -61,8 +65,9 @@ const TBM_GETPOS: u32 = 1024; // WM_USER+0 (not exposed as a named const in 0.62
 const TBM_GETRANGEMIN: u32 = 1025; // WM_USER+1
 const TBM_GETRANGEMAX: u32 = 1026; // WM_USER+2
 
-// OK / Cancel use the standard dialog ids so `IsDialogMessageW` maps Enter/Esc
-// to them automatically; everything else gets its own id.
+// OK / Cancel use the standard dialog ids, which `IsDialogMessageW` sends for
+// Esc (IDCANCEL) and for Enter while no push button has the focus (IDOK,
+// through DM_GETDEFID and `enter_target`); everything else gets its own id.
 const IDOK: i32 = 1;
 const IDCANCEL: i32 = 2;
 const IDC_APPLY: i32 = 3;
@@ -277,6 +282,26 @@ pub unsafe fn open(main: HWND) -> HWND {
     hwnd
 }
 
+/// True for the push buttons: OK, Cancel, Apply, Reset, both Clear buttons and
+/// each metric row's up and down arrows.
+fn is_push_button(id: i32) -> bool {
+    let n = MetricKey::ALL.len() as i32;
+    matches!(id, IDOK | IDCANCEL | IDC_APPLY | IDC_RESET | IDC_HK_TOGGLE_CLR | IDC_HK_SETTINGS_CLR)
+        || (IDC_MOVEUP_BASE..IDC_MOVEUP_BASE + n).contains(&id)
+        || (IDC_MOVEDN_BASE..IDC_MOVEDN_BASE + n).contains(&id)
+}
+
+/// The id Enter presses (the DM_GETDEFID answer) while control `focused` has
+/// the focus: a push button presses itself; anything else (a checkbox, an edit,
+/// a hotkey field, the trackbar, or no control at all) presses OK.
+fn enter_target(focused: i32) -> i32 {
+    if is_push_button(focused) {
+        focused
+    } else {
+        IDOK
+    }
+}
+
 unsafe extern "system" fn settings_proc(
     hwnd: HWND,
     msg: u32,
@@ -312,6 +337,16 @@ unsafe extern "system" fn settings_proc(
             }
             refresh_preview(hwnd);
             LRESULT(0)
+        }
+
+        // Enter: IsDialogMessageW asks which button is the default whenever the
+        // focused control is not a default push button (an owner-drawn button
+        // never is), and sends IDOK when the window does not answer. The answer
+        // is the focused push button, else OK (enter_target).
+        DM_GETDEFID => {
+            let focus = GetFocus();
+            let id = if IsChild(hwnd, focus).as_bool() { GetDlgCtrlID(focus) } else { 0 };
+            LRESULT(((DC_HASDEFID as isize) << 16) | enter_target(id) as u16 as isize)
         }
 
         WM_COMMAND => {
@@ -528,10 +563,11 @@ unsafe fn build_controls(hwnd: HWND, main: HWND) {
     set_hotkey_control(hk2, cur.hotkey_settings);
     child(w!("BUTTON"), "Clear", btn, 200, k + 84, 56, 22, IDC_HK_SETTINGS_CLR);
 
-    // --- Buttons (OK is the primary; Enter => OK, Esc => Cancel) ---
+    // --- Buttons (OK is the primary; Esc => Cancel) ---
     // NB: BS_DEFPUSHBUTTON can't coexist with BS_OWNERDRAW (they share BS_TYPEMASK),
-    // so "default" behavior is driven by id==IDOK — the cyan primary fill in
-    // draw_button plus IsDialogMessageW's Enter->IDOK fallback.
+    // so OK is the default only by its id: draw_button fills it cyan, and the
+    // DM_GETDEFID answer (enter_target) makes Enter press OK unless another push
+    // button has the focus, which Enter then presses instead.
     let b = lay.btn_top;
     child(w!("BUTTON"), "Reset", btn, 12, b, 64, 26, IDC_RESET);
     child(w!("BUTTON"), "OK", btn, 104, b, 52, 26, IDOK);
@@ -1072,5 +1108,36 @@ mod tests {
         let word = (spec.vk & 0xFF) | ((mods_to_hotkeyf(spec.mods) & 0xFF) << 8);
         assert_eq!(word & 0xFF, spec.vk);
         assert_eq!(hotkeyf_to_mods((word >> 8) & 0xFF), spec.mods);
+    }
+
+    #[test]
+    fn enter_presses_the_focused_push_button_else_ok() {
+        let n = MetricKey::ALL.len() as i32;
+        // A focused push button is what Enter presses.
+        for id in [
+            IDCANCEL,
+            IDC_APPLY,
+            IDC_RESET,
+            IDC_HK_TOGGLE_CLR,
+            IDC_HK_SETTINGS_CLR,
+            IDC_MOVEUP_BASE + 3,
+            IDC_MOVEDN_BASE + (n - 1),
+            IDOK,
+        ] {
+            assert_eq!(enter_target(id), id, "push button {id}");
+        }
+        // Anywhere else Enter means OK: a checkbox, an edit, a hotkey field,
+        // the trackbar, no focus, and an id past the last arrow row.
+        for id in [
+            IDC_METRIC_BASE,
+            IDC_FONT,
+            IDC_INTERVAL,
+            IDC_HK_TOGGLE,
+            IDC_OPACITY,
+            0,
+            IDC_MOVEUP_BASE + n,
+        ] {
+            assert_eq!(enter_target(id), IDOK, "not a push button: {id}");
+        }
     }
 }
