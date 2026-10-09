@@ -44,13 +44,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetDlgCtrlID, GetDlgItem,
     GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextW, IsChild, PostMessageW,
-    RegisterClassW, SendMessageW, SetWindowLongPtrW, SetWindowPos, BS_OWNERDRAW, CREATESTRUCTW,
-    CW_USEDEFAULT, DC_HASDEFID, DM_GETDEFID, ES_NUMBER, GWLP_USERDATA, HMENU, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOZORDER, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
-    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_GETFONT,
-    WM_HSCROLL, WM_KEYDOWN, WM_KEYUP, WM_NOTIFY, WM_PAINT, WM_SETFOCUS, WM_SETFONT, WM_SETTEXT,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_OVERLAPPED,
-    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    RegisterClassW, SendMessageW, SetWindowLongPtrW, SetWindowPos, BN_DOUBLECLICKED, BS_OWNERDRAW,
+    CREATESTRUCTW, CW_USEDEFAULT, DC_HASDEFID, DM_GETDEFID, ES_NUMBER, GWLP_USERDATA, HMENU,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_ACTIVATE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
+    WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_GETFONT, WM_HSCROLL, WM_KEYDOWN, WM_KEYUP,
+    WM_NOTIFY, WM_PAINT, WM_SETFOCUS, WM_SETFONT, WM_SETTEXT, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::config::Config;
@@ -100,6 +100,9 @@ thread_local! {
     /// The working metric list: every metric in display order, each with its
     /// enabled flag. The row checkboxes mirror this; ▲/▼ reorder it; Apply reads it.
     static METRIC_STATE: RefCell<Vec<(MetricKey, bool)>> = const { RefCell::new(Vec::new()) };
+    /// The id of the control that had the focus when the window was last
+    /// deactivated (0 until then); WM_SETFOCUS gives the focus back to it.
+    static LAST_FOCUS: Cell<i32> = const { Cell::new(0) };
 }
 
 /// The settings window's current DPI scale (set in `build_controls`).
@@ -304,6 +307,33 @@ fn enter_target(focused: i32) -> i32 {
     }
 }
 
+/// The control WM_SETFOCUS passes the focus on to: `saved`, the one that had
+/// it at the last deactivation, or the first metric checkbox while none was
+/// saved (0).
+fn focus_target(saved: i32) -> i32 {
+    if saved == 0 {
+        IDC_METRIC_BASE
+    } else {
+        saved
+    }
+}
+
+/// The move an up (`up`) or down arrow in metric row `row` of `len` makes:
+/// Some((from, to)), the rows the item leaves and lands in, or None at either
+/// end. The focus then goes to the same arrow in row `to`, so the next press
+/// moves the same item on. `double` is a double-click's BN_DOUBLECLICKED,
+/// which the clicked arrow sends after its first click has already moved the
+/// item one row: the item moves on from there, two rows in all.
+fn reorder_step(len: usize, row: usize, up: bool, double: bool) -> Option<(usize, usize)> {
+    let from = match (double, up) {
+        (false, _) => row,
+        (true, true) => row.checked_sub(1)?,
+        (true, false) => row + 1,
+    };
+    let to = if up { from.checked_sub(1)? } else { from + 1 };
+    (to < len).then_some((from, to))
+}
+
 unsafe extern "system" fn settings_proc(
     hwnd: HWND,
     msg: u32,
@@ -320,10 +350,25 @@ unsafe extern "system" fn settings_proc(
             LRESULT(0)
         }
 
-        // Keep keyboard focus on a real control (so Tab navigation has a
-        // starting point) whenever the frame itself would take focus.
+        // Deactivation: remember the control that has the focus, for
+        // WM_SETFOCUS to give it back; then the default handling.
+        WM_ACTIVATE => {
+            if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE {
+                let focus = GetFocus();
+                if IsChild(hwnd, focus).as_bool() {
+                    LAST_FOCUS.with(|c| c.set(GetDlgCtrlID(focus)));
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+
+        // The frame itself took the focus, as DefWindowProcW makes it do on
+        // every activation: pass it on to the control that had it at the last
+        // deactivation, else to the first metric checkbox (focus_target), so
+        // typing goes on where it was and Tab navigation has a starting point.
         WM_SETFOCUS => {
-            if let Ok(c) = GetDlgItem(Some(hwnd), IDC_METRIC_BASE) {
+            let id = focus_target(LAST_FOCUS.with(|c| c.get()));
+            if let Ok(c) = GetDlgItem(Some(hwnd), id) {
                 let _ = SetFocus(Some(c));
             }
             LRESULT(0)
@@ -354,6 +399,7 @@ unsafe extern "system" fn settings_proc(
         WM_COMMAND => {
             let id = (wparam.0 & 0xFFFF) as i32;
             let notif = ((wparam.0 >> 16) & 0xFFFF) as u32;
+            let n = MetricKey::ALL.len() as i32;
             match id {
                 IDOK => {
                     apply(hwnd);
@@ -371,9 +417,7 @@ unsafe extern "system" fn settings_proc(
                 IDC_HK_SETTINGS_CLR => clear_hotkey(hwnd, IDC_HK_SETTINGS),
                 // Live-preview triggers: the font edit changed, or a metric toggled.
                 IDC_FONT if notif == EN_CHANGE => refresh_preview(hwnd),
-                _ if (IDC_METRIC_BASE..IDC_METRIC_BASE + MetricKey::ALL.len() as i32)
-                    .contains(&id) =>
-                {
+                _ if (IDC_METRIC_BASE..IDC_METRIC_BASE + n).contains(&id) => {
                     // Toggle this row's metric on/off in the working list.
                     let p = (id - IDC_METRIC_BASE) as usize;
                     METRIC_STATE.with(|st| {
@@ -383,24 +427,22 @@ unsafe extern "system" fn settings_proc(
                     render_metric_rows(hwnd);
                     refresh_preview(hwnd);
                 }
-                _ if (IDC_MOVEUP_BASE..IDC_MOVEUP_BASE + MetricKey::ALL.len() as i32)
-                    .contains(&id) =>
+                // An up or down arrow moves its row's item, and the focus goes
+                // with the item, to the same arrow in its new row (reorder_step).
+                _ if (IDC_MOVEUP_BASE..IDC_MOVEUP_BASE + n).contains(&id)
+                    || (IDC_MOVEDN_BASE..IDC_MOVEDN_BASE + n).contains(&id) =>
                 {
-                    let p = (id - IDC_MOVEUP_BASE) as usize;
-                    if p > 0 {
-                        METRIC_STATE.with(|st| st.borrow_mut().swap(p, p - 1));
+                    let up = id < IDC_MOVEDN_BASE;
+                    let base = if up { IDC_MOVEUP_BASE } else { IDC_MOVEDN_BASE };
+                    let double = notif == BN_DOUBLECLICKED;
+                    let step = reorder_step(n as usize, (id - base) as usize, up, double);
+                    if let Some((from, to)) = step {
+                        METRIC_STATE.with(|st| st.borrow_mut().swap(from, to));
                         render_metric_rows(hwnd);
                         refresh_preview(hwnd);
-                    }
-                }
-                _ if (IDC_MOVEDN_BASE..IDC_MOVEDN_BASE + MetricKey::ALL.len() as i32)
-                    .contains(&id) =>
-                {
-                    let p = (id - IDC_MOVEDN_BASE) as usize;
-                    if p + 1 < MetricKey::ALL.len() {
-                        METRIC_STATE.with(|st| st.borrow_mut().swap(p, p + 1));
-                        render_metric_rows(hwnd);
-                        refresh_preview(hwnd);
+                        if let Ok(b) = GetDlgItem(Some(hwnd), base + to as i32) {
+                            let _ = SetFocus(Some(b));
+                        }
                     }
                 }
                 _ => {}
@@ -411,6 +453,7 @@ unsafe extern "system" fn settings_proc(
         WM_DESTROY => {
             free_fonts();
             METRIC_STATE.with(|s| s.borrow_mut().clear());
+            LAST_FOCUS.with(|c| c.set(0));
             let main = HWND(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut c_void);
             if !main.0.is_null() {
                 let _ = PostMessageW(Some(main), WM_APP_SETTINGS_CLOSED, WPARAM(0), LPARAM(0));
@@ -1353,5 +1396,30 @@ mod tests {
         ] {
             assert_eq!(enter_target(id), IDOK, "not a push button: {id}");
         }
+    }
+
+    #[test]
+    fn reorder_step_follows_the_item() {
+        // A click on an arrow in row 3 of 10 moves the item there: (from, to).
+        assert_eq!(reorder_step(10, 3, true, false), Some((3, 2)));
+        assert_eq!(reorder_step(10, 3, false, false), Some((3, 4)));
+        // Nothing moves past either end.
+        assert_eq!(reorder_step(10, 0, true, false), None);
+        assert_eq!(reorder_step(10, 9, false, false), None);
+        // A double-click's BN_DOUBLECLICKED comes from the same arrow after its
+        // first click has moved the item one row: the item moves on from there.
+        assert_eq!(reorder_step(10, 3, true, true), Some((2, 1)));
+        assert_eq!(reorder_step(10, 3, false, true), Some((4, 5)));
+        // The first click already took it to the end.
+        assert_eq!(reorder_step(10, 1, true, true), None);
+        assert_eq!(reorder_step(10, 8, false, true), None);
+    }
+
+    #[test]
+    fn focus_target_falls_back_to_first_metric() {
+        // Nothing saved yet: the first metric checkbox.
+        assert_eq!(focus_target(0), IDC_METRIC_BASE);
+        // Else the control that had the focus at the last deactivation.
+        assert_eq!(focus_target(IDC_FONT), IDC_FONT);
     }
 }
