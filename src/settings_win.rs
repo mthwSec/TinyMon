@@ -37,6 +37,7 @@ use windows::Win32::UI::Controls::{
     ICC_HOTKEY_CLASS, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, NMCUSTOMDRAW, NMHDR, ODS_DEFAULT,
     ODS_FOCUS, ODS_SELECTED, TBM_SETPOS, TBM_SETRANGE,
 };
+use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, MapVirtualKeyW, SetFocus, MAPVK_VK_TO_VSC_EX, MOD_ALT, MOD_CONTROL, MOD_SHIFT,
     MOD_WIN,
@@ -46,8 +47,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextW, IsChild, LoadCursorW, LoadIconW,
     PostMessageW, RegisterClassW, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     BN_DOUBLECLICKED, BS_OWNERDRAW, CREATESTRUCTW, CW_USEDEFAULT, DC_HASDEFID, DM_GETDEFID,
-    ES_NUMBER, GWLP_USERDATA, HMENU, IDC_ARROW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW,
-    WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
+    ES_NUMBER, GWLP_USERDATA, HMENU, IDC_ARROW, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WA_INACTIVE,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
     WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_GETFONT,
     WM_HSCROLL, WM_KEYDOWN, WM_KEYUP, WM_NOTIFY, WM_PAINT, WM_SETFOCUS, WM_SETFONT, WM_SETTEXT,
     WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_OVERLAPPED,
@@ -58,6 +59,7 @@ use crate::config::Config;
 use crate::dark;
 use crate::dpi::{dpi_for_window, Scale};
 use crate::hotkeys::{format_hotkey, HotkeySpec};
+use crate::placement::{fit_into, work_area_near};
 use crate::registry::{sample_rows, MetricKey};
 use crate::render::{render_rows, window_height, LIGHT, THEME};
 use crate::settings::{Settings, DEFAULT_FONT_PX, MAX_FONT_PX, MIN_FONT_PX};
@@ -87,6 +89,11 @@ const IDC_MOVEUP_BASE: i32 = 1200; // per-row "move up" button
 const IDC_MOVEDN_BASE: i32 = 1300; // per-row "move down" button
 const IDC_PREVIEW: i32 = 1020;
 const IDC_RESET: i32 = 1021;
+// The static labels, each naming the control beside or below it.
+const IDC_LBL_INTERVAL: i32 = 1022;
+const IDC_LBL_FONT: i32 = 1023;
+const IDC_LBL_HK_TOGGLE: i32 = 1024;
+const IDC_LBL_HK_SETTINGS: i32 = 1025;
 const EN_CHANGE: u32 = 0x0300;
 
 thread_local! {
@@ -190,8 +197,12 @@ const PREVIEW_W: i32 = 210;
 const CLIENT_W_TOTAL: i32 = CLIENT_W + GUTTER + PREVIEW_W;
 const PREVIEW_CLASS: PCWSTR = w!("TinyMonPreview");
 
-/// Vertical layout of the three sections — shared by `open` (to size the window)
-/// and `build_controls` (to place controls), so they can't drift apart.
+/// The settings window's style: fixed size, a caption and a close box.
+const STYLE: WINDOW_STYLE = WINDOW_STYLE(WS_OVERLAPPED.0 | WS_CAPTION.0 | WS_SYSMENU.0);
+
+/// Vertical layout of the three sections for `n` metric rows, in logical
+/// units, shared by `open` (to size the window), `control_places` (to place
+/// the controls) and `paint_chrome` (the cards), so they can't drift apart.
 struct Layout {
     metrics_top: i32,
     metrics_h: i32,
@@ -203,8 +214,7 @@ struct Layout {
     client_h: i32,
 }
 
-fn layout() -> Layout {
-    let n = MetricKey::ALL.len() as i32;
+fn layout(n: i32) -> Layout {
     let metrics_top = 8;
     let metrics_h = 18 + n * 22 + 6; // one row per metric (single ordered list)
     let app_top = metrics_top + metrics_h + 8;
@@ -214,6 +224,97 @@ fn layout() -> Layout {
     let btn_top = hk_top + hk_h + 12;
     let client_h = btn_top + 26 + 12;
     Layout { metrics_top, metrics_h, app_top, app_h, hk_top, hk_h, btn_top, client_h }
+}
+
+/// One child control's rectangle, in logical (96-dpi) client units.
+#[derive(Clone, Copy, Default, Debug)]
+struct Place {
+    id: i32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+/// Where each child control goes with `n` metric rows (callers pass
+/// MetricKey::ALL.len()): the single layout source for every child. Static
+/// labels are 18 px tall; at 16 px, 150% and 175% clip their descenders.
+fn control_places(n: i32) -> Vec<Place> {
+    let lay = layout(n);
+    let at = |id, x, y, w, h| Place { id, x, y, w, h };
+    let mut v = Vec::with_capacity(3 * n as usize + CREATION_ORDER.len());
+    // Metrics: one row per metric, a checkbox and its up and down arrows.
+    for p in 0..n {
+        let y = lay.metrics_top + 18 + p * 22;
+        v.push(at(IDC_METRIC_BASE + p, 22, y, 190, 18));
+        v.push(at(IDC_MOVEUP_BASE + p, 216, y, 22, 18));
+        v.push(at(IDC_MOVEDN_BASE + p, 240, y, 22, 18));
+    }
+    let (a, k, b) = (lay.app_top, lay.hk_top, lay.btn_top);
+    v.extend([
+        // Appearance.
+        at(IDC_OPACITY_VAL, 22, a + 22, 220, 18),
+        at(IDC_OPACITY, 20, a + 40, 238, 28),
+        at(IDC_LBL_INTERVAL, 22, a + 80, 150, 18),
+        at(IDC_INTERVAL, 196, a + 78, 62, 22),
+        at(IDC_LBL_FONT, 22, a + 108, 150, 18),
+        at(IDC_FONT, 196, a + 106, 62, 22),
+        // Hotkeys: each capture field has a Clear button.
+        at(IDC_LBL_HK_TOGGLE, 22, k + 20, 160, 18),
+        at(IDC_HK_TOGGLE, 22, k + 38, 170, 22),
+        at(IDC_HK_TOGGLE_CLR, 200, k + 38, 56, 22),
+        at(IDC_LBL_HK_SETTINGS, 22, k + 66, 160, 18),
+        at(IDC_HK_SETTINGS, 22, k + 84, 170, 22),
+        at(IDC_HK_SETTINGS_CLR, 200, k + 84, 56, 22),
+        // The buttons, below the cards.
+        at(IDC_RESET, 12, b, 64, 26),
+        at(IDOK, 104, b, 52, 26),
+        at(IDC_APPLY, 160, b, 52, 26),
+        at(IDCANCEL, 216, b, 52, 26),
+        // The live preview fills its card in the right column.
+        at(IDC_PREVIEW, CLIENT_W + GUTTER + 10, 26, PREVIEW_W - 20, lay.client_h - 44),
+    ]);
+    v
+}
+
+/// The controls build_controls creates after the metric rows, in creation
+/// order, which is also the Tab order.
+const CREATION_ORDER: [i32; 17] = [
+    IDC_OPACITY_VAL,
+    IDC_OPACITY,
+    IDC_LBL_INTERVAL,
+    IDC_INTERVAL,
+    IDC_LBL_FONT,
+    IDC_FONT,
+    IDC_LBL_HK_TOGGLE,
+    IDC_HK_TOGGLE,
+    IDC_HK_TOGGLE_CLR,
+    IDC_LBL_HK_SETTINGS,
+    IDC_HK_SETTINGS,
+    IDC_HK_SETTINGS_CLR,
+    IDC_RESET,
+    IDOK,
+    IDC_APPLY,
+    IDCANCEL,
+    IDC_PREVIEW,
+];
+
+/// Every control build_controls creates for `n` metric rows, in creation
+/// (Tab) order: each row's checkbox, up and down arrow, then CREATION_ORDER.
+fn created_ids(n: i32) -> impl Iterator<Item = i32> {
+    (0..n)
+        .flat_map(|p| [IDC_METRIC_BASE + p, IDC_MOVEUP_BASE + p, IDC_MOVEDN_BASE + p])
+        .chain(CREATION_ORDER)
+}
+
+/// How much wider and taller than its client area the settings window is at
+/// `dpi`: its caption and borders.
+fn frame_size(dpi: u32) -> (i32, i32) {
+    let mut r = RECT::default();
+    // SAFETY: AdjustWindowRectExForDpi only writes the local `r`; if it fails,
+    // `r` stays empty and the frame counts as nothing.
+    let _ = unsafe { AdjustWindowRectExForDpi(&mut r, STYLE, false, WINDOW_EX_STYLE(0), dpi) };
+    (r.right - r.left, r.bottom - r.top)
 }
 
 /// Register the settings window class + init common controls (once at startup).
@@ -252,7 +353,7 @@ pub unsafe fn register_class(hinstance: HINSTANCE) {
 /// Open the settings window; returns its handle (HWND(null) on failure).
 pub unsafe fn open(main: HWND) -> HWND {
     let hinstance = HINSTANCE(GetModuleHandleW(None).map(|h| h.0).unwrap_or(core::ptr::null_mut()));
-    let lay = layout();
+    let lay = layout(MetricKey::ALL.len() as i32);
     // Created hidden, then sized and given its dark frame, and only then
     // shown: Windows 10 does not redraw a shown caption when the dark
     // attribute arrives, so a window shown first would keep a light caption.
@@ -260,7 +361,7 @@ pub unsafe fn open(main: HWND) -> HWND {
         WINDOW_EX_STYLE(0),
         CLASS,
         w!("TinyMon Settings"),
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        STYLE,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         CLIENT_W_TOTAL,
@@ -272,26 +373,20 @@ pub unsafe fn open(main: HWND) -> HWND {
     )
     .unwrap_or_default();
 
-    // Grow the window so the *client* area is exactly (CLIENT_W, client_h),
-    // accounting for the caption + borders (DPI/theme-robust, vs. guessing).
     if !hwnd.0.is_null() {
-        let (mut cr, mut wr) = (RECT::default(), RECT::default());
-        if GetClientRect(hwnd, &mut cr).is_ok() && GetWindowRect(hwnd, &mut wr).is_ok() {
-            let nc_w = (wr.right - wr.left) - (cr.right - cr.left);
-            let nc_h = (wr.bottom - wr.top) - (cr.bottom - cr.top);
-            // Client area scaled to the window's DPI (set by build_controls during
-            // WM_CREATE); non-client (caption/border) is already in device px.
-            let s = dscale();
-            let _ = SetWindowPos(
-                hwnd,
-                None,
-                0,
-                0,
-                s.px(CLIENT_W_TOTAL) + nc_w,
-                s.px(lay.client_h) + nc_h,
-                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-        }
+        // The client area at the window's DPI (build_controls set it during
+        // WM_CREATE) plus the frame, moved from the default spot only as far
+        // as it takes to fit the work area of the nearest monitor (a window
+        // taller than the work area keeps its top edge inside it).
+        let s = dscale();
+        let (fw, fh) = frame_size(s.0);
+        let (w, h) = (s.px(CLIENT_W_TOTAL) + fw, s.px(lay.client_h) + fh);
+        let mut r = RECT::default();
+        let _ = GetWindowRect(hwnd, &mut r);
+        r.right = r.left + w;
+        r.bottom = r.top + h;
+        let (x, y) = fit_into(r.left, r.top, w, h, work_area_near(&r));
+        let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
         // Dark title bar + dark mode for the frame (controls are themed in
         // `control`), then the first show.
         dark::apply_window(hwnd);
@@ -540,25 +635,16 @@ unsafe fn build_controls(hwnd: HWND, main: HWND) {
     make_fonts();
     let font = HGDIOBJ(ui_font().0);
     let cur = current_settings(main);
-    let lay = layout();
+    let n = MetricKey::ALL.len() as i32;
+    let places = control_places(n);
 
-    // The layout is authored in logical (96-dpi) units; the child helper scales
-    // every control's position/size to the window's DPI.
+    // Each control goes to its Place (control_places), authored in logical
+    // (96-dpi) units and scaled to the window's DPI.
     let s = dscale();
-    let child = |class, text, style: u32, x, y, w, h, id| unsafe {
-        control(
-            hwnd,
-            class,
-            text,
-            WINDOW_STYLE(style),
-            s.px(x),
-            s.px(y),
-            s.px(w),
-            s.px(h),
-            id,
-            hinstance,
-            font,
-        )
+    let child = |class, text, style: u32, id| unsafe {
+        let p = places.iter().find(|p| p.id == id).copied().unwrap_or_default();
+        let (x, y, w, h) = (s.px(p.x), s.px(p.y), s.px(p.w), s.px(p.h));
+        control(hwnd, class, text, WINDOW_STYLE(style), x, y, w, h, id, hinstance, font)
     };
     let base = WS_CHILD.0 | WS_VISIBLE.0;
     let tab = base | WS_TABSTOP.0;
@@ -566,89 +652,57 @@ unsafe fn build_controls(hwnd: HWND, main: HWND) {
     // dark); see WM_DRAWITEM. The metric checkboxes track their own checked
     // state in GWLP_USERDATA (BS_OWNERDRAW has no built-in check state).
     let btn = tab | BS_OWNERDRAW as u32;
+    let field = tab | WS_BORDER.0;
+    let number = field | ES_NUMBER as u32;
 
-    // --- Metrics (single ordered list; ▲/▼ reorder) --- (card painted in `paint_chrome`)
     init_metric_state(&cur);
-    for p in 0..MetricKey::ALL.len() as i32 {
-        let y = lay.metrics_top + 18 + p * 22;
-        child(w!("BUTTON"), "", btn, 22, y, 190, 18, IDC_METRIC_BASE + p); // checkbox (label set on render)
-        child(w!("BUTTON"), "\u{25B2}", btn, 216, y, 22, 18, IDC_MOVEUP_BASE + p); // ▲ move up
-        child(w!("BUTTON"), "\u{25BC}", btn, 240, y, 22, 18, IDC_MOVEDN_BASE + p);
-        // ▼ move down
+    let opacity_text = format!("Opacity   {}", cur.opacity);
+    let interval_text = cur.interval_ms.to_string();
+    let font_text = cur.font_px.to_string();
+    // In creation order, which is the Tab order (created_ids). The cards
+    // behind the controls are painted in `paint_chrome`.
+    for id in created_ids(n) {
+        let (class, text, style) = match id {
+            IDC_OPACITY_VAL => (w!("STATIC"), opacity_text.as_str(), base),
+            IDC_OPACITY => (w!("msctls_trackbar32"), "", tab),
+            IDC_LBL_INTERVAL => (w!("STATIC"), "Update interval (ms)", base),
+            IDC_INTERVAL => (w!("EDIT"), interval_text.as_str(), number),
+            IDC_LBL_FONT => (w!("STATIC"), "Font size (px)", base),
+            IDC_FONT => (w!("EDIT"), font_text.as_str(), number),
+            IDC_LBL_HK_TOGGLE => (w!("STATIC"), "Show / Hide", base),
+            IDC_LBL_HK_SETTINGS => (w!("STATIC"), "Open settings", base),
+            IDC_HK_TOGGLE | IDC_HK_SETTINGS => (w!("msctls_hotkey32"), "", field),
+            IDC_HK_TOGGLE_CLR | IDC_HK_SETTINGS_CLR => (w!("BUTTON"), "Clear", btn),
+            // OK is the primary. NB: BS_DEFPUSHBUTTON can't coexist with
+            // BS_OWNERDRAW (they share BS_TYPEMASK), so OK is the default only
+            // by its id: draw_button fills it cyan, and the DM_GETDEFID answer
+            // (enter_target) makes Enter press OK unless another push button
+            // has the focus, which Enter then presses instead. Esc => Cancel.
+            IDC_RESET => (w!("BUTTON"), "Reset", btn),
+            IDOK => (w!("BUTTON"), "OK", btn),
+            IDC_APPLY => (w!("BUTTON"), "Apply", btn),
+            IDCANCEL => (w!("BUTTON"), "Cancel", btn),
+            // The live preview: a real mini-widget rendered with the SAME
+            // render_rows as the widget, updated as the controls change.
+            IDC_PREVIEW => (PREVIEW_CLASS, "", base | WS_BORDER.0),
+            // A metric row: its checkbox (labelled by render_metric_rows), then
+            // its up and down arrows, which reorder the list.
+            _ if id < IDC_MOVEUP_BASE => (w!("BUTTON"), "", btn),
+            _ if id < IDC_MOVEDN_BASE => (w!("BUTTON"), "\u{25B2}", btn),
+            _ => (w!("BUTTON"), "\u{25BC}", btn),
+        };
+        let c = child(class, text, style, id);
+        match id {
+            IDC_OPACITY => {
+                SendMessageW(c, TBM_SETRANGE, Some(WPARAM(1)), Some(range(40, 255)));
+                SendMessageW(c, TBM_SETPOS, Some(WPARAM(1)), Some(LPARAM(cur.opacity as isize)));
+            }
+            IDC_HK_TOGGLE => set_hotkey_control(c, cur.hotkey_toggle),
+            IDC_HK_SETTINGS => set_hotkey_control(c, cur.hotkey_settings),
+            _ => {}
+        }
     }
     render_metric_rows(hwnd);
-
-    // --- Appearance --- (card panel + title painted in `paint_chrome`)
-    let a = lay.app_top;
-    let opacity_text = format!("Opacity   {}", cur.opacity);
-    child(w!("STATIC"), &opacity_text, base, 22, a + 22, 220, 16, IDC_OPACITY_VAL);
-    let tb = child(w!("msctls_trackbar32"), "", tab, 20, a + 40, 238, 28, IDC_OPACITY);
-    SendMessageW(tb, TBM_SETRANGE, Some(WPARAM(1)), Some(range(40, 255)));
-    SendMessageW(tb, TBM_SETPOS, Some(WPARAM(1)), Some(LPARAM(cur.opacity as isize)));
-
-    let interval_text = cur.interval_ms.to_string();
-    child(w!("STATIC"), "Update interval (ms)", base, 22, a + 80, 150, 16, 0);
-    child(
-        w!("EDIT"),
-        &interval_text,
-        tab | WS_BORDER.0 | ES_NUMBER as u32,
-        196,
-        a + 78,
-        62,
-        22,
-        IDC_INTERVAL,
-    );
-
-    let font_text = cur.font_px.to_string();
-    child(w!("STATIC"), "Font size (px)", base, 22, a + 108, 150, 16, 0);
-    child(
-        w!("EDIT"),
-        &font_text,
-        tab | WS_BORDER.0 | ES_NUMBER as u32,
-        196,
-        a + 106,
-        62,
-        22,
-        IDC_FONT,
-    );
-
-    // --- Hotkeys (each capture field has a Clear button) --- (card in `paint_chrome`)
-    let k = lay.hk_top;
-    child(w!("STATIC"), "Show / Hide", base, 22, k + 20, 160, 16, 0);
-    let hk1 =
-        child(w!("msctls_hotkey32"), "", tab | WS_BORDER.0, 22, k + 38, 170, 22, IDC_HK_TOGGLE);
-    set_hotkey_control(hk1, cur.hotkey_toggle);
-    child(w!("BUTTON"), "Clear", btn, 200, k + 38, 56, 22, IDC_HK_TOGGLE_CLR);
-    child(w!("STATIC"), "Open settings", base, 22, k + 66, 160, 16, 0);
-    let hk2 =
-        child(w!("msctls_hotkey32"), "", tab | WS_BORDER.0, 22, k + 84, 170, 22, IDC_HK_SETTINGS);
-    set_hotkey_control(hk2, cur.hotkey_settings);
-    child(w!("BUTTON"), "Clear", btn, 200, k + 84, 56, 22, IDC_HK_SETTINGS_CLR);
-
-    // --- Buttons (OK is the primary; Esc => Cancel) ---
-    // NB: BS_DEFPUSHBUTTON can't coexist with BS_OWNERDRAW (they share BS_TYPEMASK),
-    // so OK is the default only by its id: draw_button fills it cyan, and the
-    // DM_GETDEFID answer (enter_target) makes Enter press OK unless another push
-    // button has the focus, which Enter then presses instead.
-    let b = lay.btn_top;
-    child(w!("BUTTON"), "Reset", btn, 12, b, 64, 26, IDC_RESET);
-    child(w!("BUTTON"), "OK", btn, 104, b, 52, 26, IDOK);
-    child(w!("BUTTON"), "Apply", btn, 160, b, 52, 26, IDC_APPLY);
-    child(w!("BUTTON"), "Cancel", btn, 216, b, 52, 26, IDCANCEL);
-
-    // --- Live preview (right column) — a real mini-widget rendered with the SAME
-    // render_rows as the widget, updated as the controls change. (card in `paint_chrome`) ---
-    let px = CLIENT_W + GUTTER;
-    child(
-        PREVIEW_CLASS,
-        "",
-        base | WS_BORDER.0,
-        px + 10,
-        26,
-        PREVIEW_W - 20,
-        lay.client_h - 44,
-        IDC_PREVIEW,
-    );
 
     // Start focus on the first checkbox so Tab has somewhere to go; seed preview.
     if let Ok(c) = GetDlgItem(Some(hwnd), IDC_METRIC_BASE) {
@@ -886,7 +940,7 @@ unsafe fn paint_chrome(hwnd: HWND, hdc: HDC) {
     let _ = GetClientRect(hwnd, &mut client);
     fill(hdc, &client, dark::WINDOW_BG);
 
-    let lay = layout();
+    let lay = layout(MetricKey::ALL.len() as i32);
     let s = dscale();
     // Card rects, authored in logical units then scaled to the window DPI.
     let card = |x0: i32, y0: i32, x1: i32, y1: i32| RECT {
@@ -1441,5 +1495,99 @@ mod tests {
         assert_eq!(focus_target(0), IDC_METRIC_BASE);
         // Else the control that had the focus at the last deactivation.
         assert_eq!(focus_target(IDC_FONT), IDC_FONT);
+    }
+
+    #[test]
+    fn layout_ids_unique_nonzero_and_inside_client() {
+        // 9 metrics without the temp feature, 10 with it: both in one run.
+        for n in [9, 10] {
+            let client_h = layout(n).client_h;
+            let places = control_places(n);
+            for (i, p) in places.iter().enumerate() {
+                assert_ne!(p.id, 0, "{p:?}");
+                assert!(places[..i].iter().all(|q| q.id != p.id), "duplicate id: {p:?}");
+                assert!(p.x >= 0 && p.y >= 0 && p.w > 0 && p.h > 0, "{p:?}");
+                assert!(p.x + p.w <= CLIENT_W_TOTAL && p.y + p.h <= client_h, "{p:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn layout_controls_do_not_overlap() {
+        for n in [9, 10] {
+            let places = control_places(n);
+            for (i, a) in places.iter().enumerate() {
+                for b in &places[i + 1..] {
+                    let apart = a.x + a.w <= b.x
+                        || b.x + b.w <= a.x
+                        || a.y + a.h <= b.y
+                        || b.y + b.h <= a.y;
+                    assert!(apart, "{a:?} overlaps {b:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn card_controls_sit_inside_their_cards() {
+        for n in [9, 10] {
+            let lay = layout(n);
+            let places = control_places(n);
+            let rows: Vec<i32> = (0..n)
+                .flat_map(|p| [IDC_METRIC_BASE + p, IDC_MOVEUP_BASE + p, IDC_MOVEDN_BASE + p])
+                .collect();
+            let appearance = [
+                IDC_OPACITY_VAL,
+                IDC_OPACITY,
+                IDC_LBL_INTERVAL,
+                IDC_INTERVAL,
+                IDC_LBL_FONT,
+                IDC_FONT,
+            ];
+            let hotkeys = [
+                IDC_LBL_HK_TOGGLE,
+                IDC_HK_TOGGLE,
+                IDC_HK_TOGGLE_CLR,
+                IDC_LBL_HK_SETTINGS,
+                IDC_HK_SETTINGS,
+                IDC_HK_SETTINGS_CLR,
+            ];
+            // Each card's top, height and controls, as paint_chrome paints it.
+            let cards = [
+                (lay.metrics_top, lay.metrics_h, &rows[..]),
+                (lay.app_top, lay.app_h, &appearance[..]),
+                (lay.hk_top, lay.hk_h, &hotkeys[..]),
+            ];
+            for (top, h, ids) in cards {
+                for &id in ids {
+                    let p = places.iter().find(|p| p.id == id).expect("placed");
+                    // Between the card's sides (x 10..270), below its title
+                    // band (its top 16 px) and above its bottom edge.
+                    assert!(p.x >= 10 && p.x + p.w <= 270, "{p:?}");
+                    assert!(p.y >= top + 16 && p.y + p.h <= top + h, "{p:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_created_control_has_a_place() {
+        for n in [9, 10] {
+            let places = control_places(n);
+            for id in created_ids(n) {
+                assert_eq!(places.iter().filter(|p| p.id == id).count(), 1, "id {id}");
+            }
+            // And nothing else is placed: the table is exactly what is created.
+            assert_eq!(created_ids(n).count(), places.len());
+        }
+    }
+
+    #[test]
+    fn settings_window_fits_the_left_monitor() {
+        // The development machine's left monitor (its work area): a window
+        // whose default spot runs past its right and bottom edges moves the
+        // least to fit, as open() moves it with placement::fit_into.
+        let left = RECT { left: -1920, top: -39, right: 0, bottom: 1041 };
+        assert_eq!(fit_into(-100, 900, 562, 605, left), (-562, 436));
     }
 }
