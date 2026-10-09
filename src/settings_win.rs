@@ -784,8 +784,8 @@ unsafe fn build_controls(hwnd: HWND, main: HWND) {
             IDC_INTERVAL => (w!("EDIT"), interval_text.as_str(), number),
             IDC_LBL_FONT => (w!("STATIC"), FONT_LABEL, base | SS_ENDELLIPSIS),
             IDC_FONT => (w!("EDIT"), font_text.as_str(), number),
-            IDC_LBL_HK_TOGGLE => (w!("STATIC"), "Show / Hide", base),
-            IDC_LBL_HK_SETTINGS => (w!("STATIC"), "Open settings", base),
+            IDC_LBL_HK_TOGGLE => (w!("STATIC"), "Show / Hide", base | SS_ENDELLIPSIS),
+            IDC_LBL_HK_SETTINGS => (w!("STATIC"), "Open settings", base | SS_ENDELLIPSIS),
             // The notes beside them, right-aligned (refresh_hotkey_notes).
             IDC_HK_TOGGLE_NOTE | IDC_HK_SETTINGS_NOTE => {
                 (w!("STATIC"), "", base | SS_RIGHT | SS_ENDELLIPSIS)
