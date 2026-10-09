@@ -272,9 +272,13 @@ struct Place {
 }
 
 impl Place {
-    /// This Place in device pixels at scale `s`: (x, y, w, h).
+    /// This Place in device pixels at scale `s`: (x, y, w, h). Its edges are
+    /// scaled and its size is the distance between them, as paint_chrome
+    /// scales its cards: a size rounded on its own can end one pixel past the
+    /// scaled edge of the control it touches (at 125%, 175% and 225%).
     fn scaled(self, s: Scale) -> (i32, i32, i32, i32) {
-        (s.px(self.x), s.px(self.y), s.px(self.w), s.px(self.h))
+        let (l, t) = (s.px(self.x), s.px(self.y));
+        (l, t, s.px(self.x + self.w) - l, s.px(self.y + self.h) - t)
     }
 }
 
@@ -1867,6 +1871,32 @@ mod tests {
     }
 
     #[test]
+    fn scaled_controls_do_not_overlap_at_any_dpi() {
+        // Controls that touch in logical units (each 18 px label and the field
+        // right below it) must still only touch in device pixels, where
+        // build_controls and place_controls put them (Place::scaled), at every
+        // scale from 100% to 225%.
+        for n in [9, 10] {
+            let places = control_places(n);
+            for dpi in [96, 120, 144, 168, 192, 216] {
+                let rects: Vec<_> = places.iter().map(|p| (p, p.scaled(Scale(dpi)))).collect();
+                for (i, (a, ra)) in rects.iter().enumerate() {
+                    for (b, rb) in &rects[i + 1..] {
+                        let apart = ra.0 + ra.2 <= rb.0
+                            || rb.0 + rb.2 <= ra.0
+                            || ra.1 + ra.3 <= rb.1
+                            || rb.1 + rb.3 <= ra.1;
+                        assert!(
+                            apart,
+                            "{dpi} dpi, {n} rows: {a:?} at {ra:?} overlaps {b:?} at {rb:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn card_controls_sit_inside_their_cards() {
         for n in [9, 10] {
             let lay = layout(n);
@@ -1973,8 +2003,10 @@ mod tests {
             let pane = control_places(n).into_iter().find(|p| p.id == IDC_PREVIEW).expect("pane");
             for dpi in [96, 120, 144, 168, 192] {
                 let s = Scale(dpi);
-                // The pane's client area: its Place less a 1 px border each side.
-                let (inner, widest) = (s.px(pane.w) - 2, win_w(s, MAX_FONT_PX));
+                // The pane's client area: its Place at this scale, as
+                // build_controls sizes it, less a 1 px border each side.
+                let (_, _, w, _) = pane.scaled(s);
+                let (inner, widest) = (w - 2, win_w(s, MAX_FONT_PX));
                 assert!(inner >= widest, "{dpi} dpi: pane {inner} < widget {widest}");
             }
         }
