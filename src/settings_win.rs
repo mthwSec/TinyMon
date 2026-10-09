@@ -33,10 +33,10 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
-    InitCommonControlsEx, CDDS_ITEMPREPAINT, CDDS_PREPAINT, DRAWITEMSTRUCT, HKM_GETHOTKEY,
-    HKM_SETHOTKEY, HOTKEYF_ALT, HOTKEYF_CONTROL, HOTKEYF_EXT, HOTKEYF_SHIFT, ICC_BAR_CLASSES,
-    ICC_HOTKEY_CLASS, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, NMCUSTOMDRAW, NMHDR, ODS_DEFAULT,
-    ODS_FOCUS, ODS_SELECTED, TBM_SETPOS, TBM_SETRANGE,
+    InitCommonControlsEx, CDDS_ITEMPREPAINT, CDDS_PREPAINT, DRAWITEMSTRUCT, EM_LIMITTEXT,
+    HKM_GETHOTKEY, HKM_SETHOTKEY, HOTKEYF_ALT, HOTKEYF_CONTROL, HOTKEYF_EXT, HOTKEYF_SHIFT,
+    ICC_BAR_CLASSES, ICC_HOTKEY_CLASS, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, NMCUSTOMDRAW,
+    NMHDR, ODS_DEFAULT, ODS_FOCUS, ODS_SELECTED, TBM_SETPOS, TBM_SETRANGE,
 };
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -63,7 +63,7 @@ use crate::hotkeys::{format_hotkey, HotkeySpec};
 use crate::placement::{fit_into, work_area_near};
 use crate::registry::{sample_rows, MetricKey};
 use crate::render::{render_rows, win_w, window_height, LIGHT, THEME};
-use crate::settings::{Settings, DEFAULT_FONT_PX, MAX_FONT_PX, MIN_FONT_PX};
+use crate::settings::{Settings, MAX_FONT_PX, MAX_INTERVAL_MS, MIN_FONT_PX, MIN_INTERVAL_MS};
 use crate::{create_mono_font, current_settings, queue_apply, WM_APP_SETTINGS_CLOSED};
 
 const CLASS: PCWSTR = w!("TinyMonSettings");
@@ -96,6 +96,19 @@ const IDC_LBL_FONT: i32 = 1023;
 const IDC_LBL_HK_TOGGLE: i32 = 1024;
 const IDC_LBL_HK_SETTINGS: i32 = 1025;
 const EN_CHANGE: u32 = 0x0300;
+/// SS_ENDELLIPSIS: a static's text that does not fit ends in an ellipsis on
+/// its one line, instead of wrapping onto a second line that its height clips
+/// (the windows crate has it only under a feature TinyMon does not enable).
+const SS_ENDELLIPSIS: u32 = 0x4000;
+
+/// The interval and font labels. They state the ranges apply() clamps to, as
+/// literals (range_labels_match_the_clamp_constants keeps them in step).
+const INTERVAL_LABEL: &str = "Update interval (250\u{2013}10000 ms)";
+const FONT_LABEL: &str = "Font size (9\u{2013}16 px)";
+/// The most characters the interval and font edits take (EM_LIMITTEXT): the
+/// digits of their largest values.
+const INTERVAL_CHARS: usize = 5;
+const FONT_CHARS: usize = 2;
 
 thread_local! {
     /// The settings window's DPI (96 = 100%), set in `build_controls` and again
@@ -272,9 +285,9 @@ fn control_places(n: i32) -> Vec<Place> {
         // Appearance.
         at(IDC_OPACITY_VAL, 22, a + 22, 220, 18),
         at(IDC_OPACITY, 20, a + 40, 238, 28),
-        at(IDC_LBL_INTERVAL, 22, a + 80, 150, 18),
+        at(IDC_LBL_INTERVAL, 22, a + 80, 172, 18),
         at(IDC_INTERVAL, 196, a + 78, 62, 22),
-        at(IDC_LBL_FONT, 22, a + 108, 150, 18),
+        at(IDC_LBL_FONT, 22, a + 108, 172, 18),
         at(IDC_FONT, 196, a + 106, 62, 22),
         // Hotkeys: each capture field has a Clear button.
         at(IDC_LBL_HK_TOGGLE, 22, k + 20, 160, 18),
@@ -721,9 +734,9 @@ unsafe fn build_controls(hwnd: HWND, main: HWND) {
         let (class, text, style) = match id {
             IDC_OPACITY_VAL => (w!("STATIC"), opacity_text.as_str(), base),
             IDC_OPACITY => (w!("msctls_trackbar32"), "", tab),
-            IDC_LBL_INTERVAL => (w!("STATIC"), "Update interval (ms)", base),
+            IDC_LBL_INTERVAL => (w!("STATIC"), INTERVAL_LABEL, base | SS_ENDELLIPSIS),
             IDC_INTERVAL => (w!("EDIT"), interval_text.as_str(), number),
-            IDC_LBL_FONT => (w!("STATIC"), "Font size (px)", base),
+            IDC_LBL_FONT => (w!("STATIC"), FONT_LABEL, base | SS_ENDELLIPSIS),
             IDC_FONT => (w!("EDIT"), font_text.as_str(), number),
             IDC_LBL_HK_TOGGLE => (w!("STATIC"), "Show / Hide", base),
             IDC_LBL_HK_SETTINGS => (w!("STATIC"), "Open settings", base),
@@ -752,6 +765,12 @@ unsafe fn build_controls(hwnd: HWND, main: HWND) {
             IDC_OPACITY => {
                 SendMessageW(c, TBM_SETRANGE, Some(WPARAM(1)), Some(range(40, 255)));
                 SendMessageW(c, TBM_SETPOS, Some(WPARAM(1)), Some(LPARAM(cur.opacity as isize)));
+            }
+            IDC_INTERVAL => {
+                SendMessageW(c, EM_LIMITTEXT, Some(WPARAM(INTERVAL_CHARS)), None);
+            }
+            IDC_FONT => {
+                SendMessageW(c, EM_LIMITTEXT, Some(WPARAM(FONT_CHARS)), None);
             }
             IDC_HK_TOGGLE => set_hotkey_control(c, cur.hotkey_toggle),
             IDC_HK_SETTINGS => set_hotkey_control(c, cur.hotkey_settings),
@@ -869,8 +888,11 @@ unsafe fn paint_preview(hwnd: HWND) {
         let order = enabled_order();
         let rows = sample_rows(&order);
         let opacity = read_trackbar(parent, IDC_OPACITY).clamp(40, 255) as u8;
-        let font_px = (read_edit_u32(parent, IDC_FONT, DEFAULT_FONT_PX as u32) as i32)
-            .clamp(MIN_FONT_PX, MAX_FONT_PX);
+        // The font field reads as apply() reads it: text that is no number
+        // stands for the widget's current font.
+        let main = HWND(GetWindowLongPtrW(parent, GWLP_USERDATA) as *mut c_void);
+        let cur = current_settings(main);
+        let font_px = read_font(parent, cur.font_px);
         let scale = Scale(dpi_for_window(hwnd));
         let font = create_mono_font(scale, font_px);
 
@@ -897,8 +919,7 @@ unsafe fn paint_preview(hwnd: HWND) {
             })
             .collect();
         // Reflect the widget's light/dark choice in the preview.
-        let main = HWND(GetWindowLongPtrW(parent, GWLP_USERDATA) as *mut c_void);
-        let theme = if !main.0.is_null() && current_settings(main).light { &LIGHT } else { &THEME };
+        let theme = if cur.light { &LIGHT } else { &THEME };
         let hist: Vec<&[f32]> = preview_hist.iter().map(Vec::as_slice).collect();
         render_rows(mem, w, h, &rows, font, scale, font_px, theme, &hist);
         SetDCBrushColor(hdc, COLORREF(theme.bg));
@@ -1193,8 +1214,9 @@ unsafe fn trackbar_customdraw(cd: &NMCUSTOMDRAW) -> LRESULT {
     LRESULT(CDRF_DODEFAULT)
 }
 
-/// Read the controls, build a clamped `Settings`, and hand it to the main window
-/// (`queue_apply`: nothing is left behind if the post fails).
+/// Read the controls, build a clamped `Settings`, show its interval and font
+/// in their edits, and hand it to the main window (`queue_apply`: nothing is
+/// left behind if the post fails).
 unsafe fn apply(hwnd: HWND) {
     let main = HWND(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut c_void);
     if main.0.is_null() {
@@ -1205,8 +1227,11 @@ unsafe fn apply(hwnd: HWND) {
     // Enabled metrics in the user's arranged order (from the reorderable list).
     let metrics: Vec<String> = enabled_order().iter().map(|k| k.as_str().to_string()).collect();
     let opacity = read_trackbar(hwnd, IDC_OPACITY).clamp(0, 255) as u8;
-    let interval = read_edit_u32(hwnd, IDC_INTERVAL, cur.interval_ms);
-    let font = read_edit_u32(hwnd, IDC_FONT, cur.font_px as u32) as i32;
+    // The numbers in the edits, clamped to their ranges; any other text keeps
+    // the current value (parse_clamped).
+    let text = read_edit_text(hwnd, IDC_INTERVAL);
+    let interval = parse_clamped(&text, MIN_INTERVAL_MS, MAX_INTERVAL_MS, cur.interval_ms);
+    let font = read_font(hwnd, cur.font_px);
 
     // The fields cannot show Win: a saved Win combo survives an untouched field.
     let hk_toggle = effective_hotkey(cur.hotkey_toggle, read_hotkey(hwnd, IDC_HK_TOGGLE));
@@ -1225,6 +1250,13 @@ unsafe fn apply(hwnd: HWND) {
         light: Some(cur.light), // theme is toggled from the tray, not this dialog
     };
     let new = Settings::from_config(&cfg);
+    // The edits show the values that apply: a number out of range reads as
+    // the end of the range, any other text as the value kept.
+    for (id, value) in [(IDC_INTERVAL, new.interval_ms), (IDC_FONT, new.font_px as u32)] {
+        if let Ok(e) = GetDlgItem(Some(hwnd), id) {
+            set_text(e, &value.to_string());
+        }
+    }
     queue_apply(main, new);
 }
 
@@ -1253,15 +1285,34 @@ unsafe fn read_trackbar(dlg: HWND, id: i32) -> i32 {
     }
 }
 
-/// Read an edit control's text as a u32 (falling back to `default` if empty).
-unsafe fn read_edit_u32(dlg: HWND, id: i32, default: u32) -> u32 {
-    let Ok(ctrl) = GetDlgItem(Some(dlg), id) else { return default };
+/// An edit control's text: its first 15 characters, more than EM_LIMITTEXT
+/// lets anyone type ("" without the control).
+unsafe fn read_edit_text(dlg: HWND, id: i32) -> String {
+    let Ok(ctrl) = GetDlgItem(Some(dlg), id) else { return String::new() };
     let mut buf = [0u16; 16];
     let n = GetWindowTextW(ctrl, &mut buf);
-    if n <= 0 {
-        return default;
+    String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+/// The number an edit's `text` sets: its digits (spaces around them do not
+/// count), clamped to lo..=hi. Digits beyond what a u32 holds saturate, so
+/// they give `hi`; anything that is not digits, nothing included, gives
+/// `fallback`, the current value.
+fn parse_clamped(text: &str, lo: u32, hi: u32, fallback: u32) -> u32 {
+    let t = text.trim();
+    if t.is_empty() || !t.bytes().all(|b| b.is_ascii_digit()) {
+        return fallback;
     }
-    String::from_utf16_lossy(&buf[..n as usize]).trim().parse().unwrap_or(default)
+    let n = t.bytes().fold(0u32, |n, b| n.saturating_mul(10).saturating_add(u32::from(b - b'0')));
+    // max and min rather than clamp, whose check that lo <= hi could panic.
+    n.max(lo).min(hi)
+}
+
+/// The font size the font edit of `dlg` sets (parse_clamped), with `current`
+/// for text that is no number: what apply() saves and the preview shows.
+unsafe fn read_font(dlg: HWND, current: i32) -> i32 {
+    let text = read_edit_text(dlg, IDC_FONT);
+    parse_clamped(&text, MIN_FONT_PX as u32, MAX_FONT_PX as u32, current as u32) as i32
 }
 
 /// Read a hotkey control -> spec (`word_to_spec`: None while it holds no key).
@@ -1743,5 +1794,37 @@ mod tests {
         assert_eq!(fit_preview(300, 100, 248, 528), (0, 223, 248, 82));
         // Nothing to show.
         assert_eq!(fit_preview(0, 10, 248, 528), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn parse_clamped_saturates_and_clamps() {
+        // Below the interval's range: its bottom.
+        assert_eq!(parse_clamped("100", 250, 10000, 1000), 250);
+        // More than a u32 holds: the top (the old reader kept the old value).
+        assert_eq!(parse_clamped("99999999999", 250, 10000, 1000), 10000);
+        // A font size the old reader wrapped to a negative i32, so to 9.
+        assert_eq!(parse_clamped("3000000000", 9, 16, 13), 16);
+        // Spaces around the digits do not count.
+        assert_eq!(parse_clamped(" 14 ", 9, 16, 13), 14);
+        // Anything but digits keeps the current value, the fallback.
+        for text in ["", "12a", "-5"] {
+            assert_eq!(parse_clamped(text, 9, 16, 13), 13, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn range_labels_match_the_clamp_constants() {
+        // The labels are literals (no format! outside the tests): they must
+        // state the ranges apply() clamps to.
+        let interval = format!("Update interval ({MIN_INTERVAL_MS}\u{2013}{MAX_INTERVAL_MS} ms)");
+        assert_eq!(INTERVAL_LABEL, interval);
+        assert_eq!(FONT_LABEL, format!("Font size ({MIN_FONT_PX}\u{2013}{MAX_FONT_PX} px)"));
+    }
+
+    #[test]
+    fn number_fields_hold_their_largest_value() {
+        // EM_LIMITTEXT: each edit takes exactly the digits of its top value.
+        assert_eq!(MAX_INTERVAL_MS.to_string().len(), INTERVAL_CHARS);
+        assert_eq!(MAX_FONT_PX.to_string().len(), FONT_CHARS);
     }
 }
