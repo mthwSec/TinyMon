@@ -317,7 +317,9 @@ fn control_places(n: i32) -> Vec<Place> {
 }
 
 /// The controls build_controls creates after the metric rows, in creation
-/// order, which is also the Tab order.
+/// order, which is also the Tab order and the z-order. A screen reader names
+/// an input after the closest static before it in z-order, so each input
+/// comes right after its label, and each hotkey note before its label.
 const CREATION_ORDER: [i32; 19] = [
     IDC_OPACITY_VAL,
     IDC_OPACITY,
@@ -325,12 +327,12 @@ const CREATION_ORDER: [i32; 19] = [
     IDC_INTERVAL,
     IDC_LBL_FONT,
     IDC_FONT,
-    IDC_LBL_HK_TOGGLE,
     IDC_HK_TOGGLE_NOTE,
+    IDC_LBL_HK_TOGGLE,
     IDC_HK_TOGGLE,
     IDC_HK_TOGGLE_CLR,
-    IDC_LBL_HK_SETTINGS,
     IDC_HK_SETTINGS_NOTE,
+    IDC_LBL_HK_SETTINGS,
     IDC_HK_SETTINGS,
     IDC_HK_SETTINGS_CLR,
     IDC_RESET,
@@ -1855,6 +1857,24 @@ mod tests {
             }
             // And nothing else is placed: the table is exactly what is created.
             assert_eq!(created_ids(n).count(), places.len());
+        }
+    }
+
+    #[test]
+    fn each_input_is_created_right_after_its_label() {
+        // A screen reader names a control without text of its own (the
+        // trackbar, an edit, a hotkey field) after the closest static before
+        // it in z-order, which is the creation order. So that static must be
+        // the input's label: a hotkey note created between its label and its
+        // field would give the field the note's text, or no name at all.
+        for pair in [
+            [IDC_OPACITY_VAL, IDC_OPACITY],
+            [IDC_LBL_INTERVAL, IDC_INTERVAL],
+            [IDC_LBL_FONT, IDC_FONT],
+            [IDC_LBL_HK_TOGGLE, IDC_HK_TOGGLE],
+            [IDC_LBL_HK_SETTINGS, IDC_HK_SETTINGS],
+        ] {
+            assert!(CREATION_ORDER.windows(2).any(|w| w == pair), "label, input: {pair:?}");
         }
     }
 
