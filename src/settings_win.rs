@@ -33,12 +33,12 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     InitCommonControlsEx, CDDS_ITEMPREPAINT, CDDS_PREPAINT, DRAWITEMSTRUCT, HKM_GETHOTKEY,
-    HKM_SETHOTKEY, HOTKEYF_ALT, HOTKEYF_CONTROL, HOTKEYF_SHIFT, ICC_BAR_CLASSES, ICC_HOTKEY_CLASS,
-    ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, NMCUSTOMDRAW, NMHDR, ODS_DEFAULT, ODS_FOCUS,
-    ODS_SELECTED, TBM_SETPOS, TBM_SETRANGE,
+    HKM_SETHOTKEY, HOTKEYF_ALT, HOTKEYF_CONTROL, HOTKEYF_EXT, HOTKEYF_SHIFT, ICC_BAR_CLASSES,
+    ICC_HOTKEY_CLASS, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, NMCUSTOMDRAW, NMHDR, ODS_DEFAULT,
+    ODS_FOCUS, ODS_SELECTED, TBM_SETPOS, TBM_SETRANGE,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, SetFocus, MOD_ALT, MOD_CONTROL, MOD_SHIFT,
+    GetFocus, MapVirtualKeyW, SetFocus, MAPVK_VK_TO_VSC_EX, MOD_ALT, MOD_CONTROL, MOD_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetDlgCtrlID, GetDlgItem,
@@ -1033,24 +1033,20 @@ unsafe fn read_edit_u32(dlg: HWND, id: i32, default: u32) -> u32 {
     String::from_utf16_lossy(&buf[..n as usize]).trim().parse().unwrap_or(default)
 }
 
-/// Read a hotkey control -> spec (None only if empty). A bare key with no
-/// modifier is allowed — the user may bind a single key as a global hotkey.
+/// Read a hotkey control -> spec (`word_to_spec`: None while it holds no key).
+/// A bare key with no modifier is allowed: the user may bind a single key as a
+/// global hotkey.
 unsafe fn read_hotkey(dlg: HWND, id: i32) -> Option<HotkeySpec> {
     let hk = GetDlgItem(Some(dlg), id).ok()?;
-    let raw = SendMessageW(hk, HKM_GETHOTKEY, None, None).0 as u32;
-    let vk = raw & 0xFF;
-    let mods = hotkeyf_to_mods((raw >> 8) & 0xFF);
-    if vk == 0 {
-        None
-    } else {
-        Some(HotkeySpec { mods, vk })
-    }
+    word_to_spec(SendMessageW(hk, HKM_GETHOTKEY, None, None).0 as u32)
 }
 
+/// Show `spec` in a hotkey control, flagged HOTKEYF_EXT when the key is an
+/// extended one, so the control names Left "Left" and not "Num 4".
 unsafe fn set_hotkey_control(hk: HWND, spec: Option<HotkeySpec>) {
     if let Some(s) = spec {
-        let word = (s.vk & 0xFF) | ((mods_to_hotkeyf(s.mods) & 0xFF) << 8);
-        SendMessageW(hk, HKM_SETHOTKEY, Some(WPARAM(word as usize)), None);
+        let ext = needs_ext(s.vk, MapVirtualKeyW(s.vk, MAPVK_VK_TO_VSC_EX));
+        SendMessageW(hk, HKM_SETHOTKEY, Some(WPARAM(spec_to_word(s, ext) as usize)), None);
     }
 }
 
@@ -1083,6 +1079,34 @@ fn hotkeyf_to_mods(hf: u32) -> u32 {
     m
 }
 
+/// A hotkey control's word (vk in the low byte, HOTKEYF_* in the next) as a
+/// spec: None while it holds no key (empty, or only modifiers so far).
+/// HOTKEYF_EXT only tells the control how to name the key, so it is dropped.
+fn word_to_spec(word: u32) -> Option<HotkeySpec> {
+    let vk = word & 0xFF;
+    if vk == 0 {
+        return None;
+    }
+    Some(HotkeySpec { mods: hotkeyf_to_mods((word >> 8) & 0xFF), vk })
+}
+
+/// A spec as a hotkey control's word; `ext` adds HOTKEYF_EXT, without which the
+/// control names an extended key after the key that shares its scan code (Left
+/// as "Num 4").
+fn spec_to_word(spec: HotkeySpec, ext: bool) -> u32 {
+    let hf = mods_to_hotkeyf(spec.mods) | if ext { HOTKEYF_EXT } else { 0 };
+    (spec.vk & 0xFF) | ((hf & 0xFF) << 8)
+}
+
+/// Whether `vk` is an extended key, given `vsc_ex` =
+/// `MapVirtualKeyW(vk, MAPVK_VK_TO_VSC_EX)`. Page Up, Page Down, End, Home,
+/// the arrows, Insert, Delete and Num Lock are listed by vk, because that
+/// mapping returns their numpad scan codes; any other key counts when its scan
+/// code has the E0 prefix (Pause's E1 prefix does not).
+fn needs_ext(vk: u32, vsc_ex: u32) -> bool {
+    matches!(vk, 0x21..=0x28 | 0x2D | 0x2E | 0x90) || (vsc_ex & 0xFF00) == 0xE000
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1102,12 +1126,61 @@ mod tests {
 
     #[test]
     fn hotkey_word_round_trips_through_control_format() {
-        // The control word packs vk in the low byte and HOTKEYF_* in the next —
-        // exactly what set_hotkey_control writes and read_hotkey reads back.
+        // The control word packs vk in the low byte and HOTKEYF_* in the next:
+        // what set_hotkey_control writes, read_hotkey reads back, EXT or not.
         let spec = HotkeySpec { mods: MOD_CONTROL.0 | MOD_ALT.0, vk: 0x4D };
-        let word = (spec.vk & 0xFF) | ((mods_to_hotkeyf(spec.mods) & 0xFF) << 8);
-        assert_eq!(word & 0xFF, spec.vk);
-        assert_eq!(hotkeyf_to_mods((word >> 8) & 0xFF), spec.mods);
+        for ext in [false, true] {
+            assert_eq!(word_to_spec(spec_to_word(spec, ext)), Some(spec), "ext {ext}");
+        }
+    }
+
+    #[test]
+    fn word_to_spec_drops_ext_and_incomplete_captures() {
+        // HOTKEYF_EXT (0x08) only tells the control how to name the key.
+        assert_eq!(word_to_spec(0x0825), Some(HotkeySpec { mods: 0, vk: 0x25 }));
+        assert_eq!(
+            word_to_spec(0x0E24),
+            Some(HotkeySpec { mods: MOD_CONTROL.0 | MOD_ALT.0, vk: 0x24 })
+        );
+        // A lone modifier (Shift held, no key yet) and an empty field: no hotkey.
+        assert_eq!(word_to_spec(0x0100), None);
+        assert_eq!(word_to_spec(0), None);
+    }
+
+    #[test]
+    fn spec_to_word_sets_ext_on_request() {
+        let ctrl_alt_home = HotkeySpec { mods: MOD_CONTROL.0 | MOD_ALT.0, vk: 0x24 };
+        assert_eq!(spec_to_word(ctrl_alt_home, true), 0x0E24);
+        assert_eq!(spec_to_word(HotkeySpec { mods: 0, vk: 0xDB }, false), 0x00DB);
+    }
+
+    #[test]
+    fn navigation_and_e0_keys_need_ext() {
+        // (vk, MapVirtualKeyW(vk, MAPVK_VK_TO_VSC_EX)). The navigation keys and
+        // Num Lock map to numpad scan codes, so needs_ext lists them by vk; the
+        // others count by their E0 prefix, and Pause's E1 prefix does not.
+        for (vk, sc) in [
+            (0x25, 0x004B), // Left
+            (0x24, 0x0047), // Home
+            (0x21, 0x0049), // Page Up
+            (0x2D, 0x0052), // Insert
+            (0x2E, 0x0053), // Delete
+            (0x90, 0x0045), // Num Lock
+            (0x6F, 0xE035), // numpad /
+            (0xAD, 0xE020), // Volume Mute
+            (0x5D, 0xE05D), // Apps
+        ] {
+            assert!(needs_ext(vk, sc), "vk {vk:#04X}");
+        }
+        for (vk, sc) in [
+            (0x41, 0x001E), // A
+            (0xDB, 0x001A), // [
+            (0x13, 0xE11D), // Pause
+            (0x70, 0x003B), // F1
+            (0x64, 0x004B), // numpad 4
+        ] {
+            assert!(!needs_ext(vk, sc), "vk {vk:#04X}");
+        }
     }
 
     #[test]
