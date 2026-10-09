@@ -48,8 +48,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, DC_HASDEFID, DM_GETDEFID, ES_NUMBER, GWLP_USERDATA, HMENU, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOZORDER, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
     WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_GETFONT,
-    WM_HSCROLL, WM_NOTIFY, WM_PAINT, WM_SETFOCUS, WM_SETFONT, WM_SETTEXT, WNDCLASSW, WS_BORDER,
-    WS_CAPTION, WS_CHILD, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    WM_HSCROLL, WM_KEYDOWN, WM_KEYUP, WM_NOTIFY, WM_PAINT, WM_SETFOCUS, WM_SETFONT, WM_SETTEXT,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_OVERLAPPED,
+    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::config::Config;
@@ -1052,6 +1053,27 @@ unsafe fn set_hotkey_control(hk: HWND, spec: Option<HotkeySpec>) {
     }
 }
 
+/// Called for the widget's WM_HOTKEY (`lparam` is its lParam): RegisterHotKey
+/// takes a combo TinyMon owns before any window sees it, so a hotkey field of
+/// the settings window `settings` cannot capture it by itself. If one of those
+/// fields has the focus, the combo goes into that field, followed by the
+/// WM_COMMAND(EN_CHANGE) a typed combo sends (HKM_SETHOTKEY sends none), and
+/// the result is true: the hotkey then does nothing else. Otherwise false.
+pub unsafe fn capture_fired_hotkey(settings: HWND, lparam: LPARAM) -> bool {
+    let focus = GetFocus();
+    if !IsChild(settings, focus).as_bool() {
+        return false;
+    }
+    let id = GetDlgCtrlID(focus);
+    if id != IDC_HK_TOGGLE && id != IDC_HK_SETTINGS {
+        return false;
+    }
+    set_hotkey_control(focus, Some(hotkey_from_wm_hotkey(lparam)));
+    let wp = WPARAM(((EN_CHANGE as usize) << 16) | id as usize);
+    SendMessageW(settings, WM_COMMAND, Some(wp), Some(LPARAM(focus.0 as isize)));
+    true
+}
+
 /// Map RegisterHotKey MOD_* bits to the hotkey control's HOTKEYF_* bits.
 fn mods_to_hotkeyf(mods: u32) -> u32 {
     let mut hf = 0;
@@ -1121,6 +1143,51 @@ fn effective_hotkey(saved: Option<HotkeySpec>, field: Option<HotkeySpec>) -> Opt
         }
     }
     field
+}
+
+/// Where the message loop sends a message while the settings window is open
+/// (field_key_route).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum KeyRoute {
+    /// To IsDialogMessageW: keyboard navigation (Tab, Enter, Esc, Space).
+    Dialog,
+    /// Past IsDialogMessageW, straight to its window: a focused hotkey field
+    /// gets its keys.
+    Field,
+    /// Nowhere.
+    Drop,
+}
+
+/// Shift, Ctrl and Alt (also as their left and right keys) and both Win keys.
+fn is_modifier_vk(vk: u32) -> bool {
+    matches!(vk, 0x10..=0x12 | 0xA0..=0xA5 | 0x5B | 0x5C)
+}
+
+/// How the message loop routes message `msg` (`vk` is its wParam) while the
+/// settings window is open; `in_field` says a hotkey field has the focus.
+/// Such a field takes every key as part of a combo, so its keys skip the
+/// dialog manager, except the Tab, Enter and Esc key-downs, which navigate.
+/// A modifier's key message would restart the field's capture and wipe it
+/// (the Shift of Shift+Tab, the Alt of Alt+Tab), and Alt+Enter would clear
+/// it, so they are dropped: GetMessageW has updated the key state anyway, and
+/// the field reads the modifiers from it when the combo's key arrives.
+pub fn field_key_route(in_field: bool, msg: u32, vk: u32) -> KeyRoute {
+    if !in_field {
+        return KeyRoute::Dialog;
+    }
+    match msg {
+        WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP if is_modifier_vk(vk) => KeyRoute::Drop,
+        WM_SYSKEYDOWN if vk == 0x0D => KeyRoute::Drop, // Alt+Enter
+        WM_KEYDOWN if matches!(vk, 0x09 | 0x0D | 0x1B) => KeyRoute::Dialog, // Tab, Enter, Esc
+        _ => KeyRoute::Field,
+    }
+}
+
+/// The combo a WM_HOTKEY reports: its lParam is MAKELONG(mods, vk). Only the
+/// Alt, Ctrl, Shift and Win bits count as modifiers.
+fn hotkey_from_wm_hotkey(lparam: LPARAM) -> HotkeySpec {
+    let mods = (lparam.0 & 0xFFFF) as u32 & (MOD_ALT.0 | MOD_CONTROL.0 | MOD_SHIFT.0 | MOD_WIN.0);
+    HotkeySpec { mods, vk: ((lparam.0 >> 16) & 0xFFFF) as u32 }
 }
 
 #[cfg(test)]
@@ -1212,6 +1279,49 @@ mod tests {
         assert_eq!(effective_hotkey(t(win), None), None);
         // Without Win in the saved combo the field always wins.
         assert_eq!(effective_hotkey(t(ctrl), t(0)), t(0));
+    }
+
+    #[test]
+    fn modifiers_never_reach_a_focused_hotkey_field() {
+        use windows::Win32::UI::WindowsAndMessaging::{WM_CHAR, WM_LBUTTONDOWN, WM_MOUSEMOVE};
+        let (tab, enter, esc, m) = (0x09, 0x0D, 0x1B, 0x4D);
+        // Shift, Ctrl and Alt (either side) and Win: GetMessageW has already
+        // updated the key state, which the field reads when the key comes.
+        for vk in (0x10..=0x12).chain(0xA0..=0xA5).chain([0x5B, 0x5C]) {
+            for msg in [WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP] {
+                assert_eq!(field_key_route(true, msg, vk), KeyRoute::Drop, "{msg:#06X} {vk:#04X}");
+            }
+        }
+        // Alt+Enter would clear the field.
+        assert_eq!(field_key_route(true, WM_SYSKEYDOWN, enter), KeyRoute::Drop);
+        // Tab, Enter and Esc key-downs navigate: the next control, OK, Cancel.
+        for vk in [tab, enter, esc] {
+            assert_eq!(field_key_route(true, WM_KEYDOWN, vk), KeyRoute::Dialog, "{vk:#04X}");
+        }
+        // The rest goes to the field: a key with or without Alt, a key-up,
+        // mouse messages and characters (whatever their wParam).
+        assert_eq!(field_key_route(true, WM_KEYDOWN, m), KeyRoute::Field);
+        assert_eq!(field_key_route(true, WM_SYSKEYDOWN, m), KeyRoute::Field);
+        assert_eq!(field_key_route(true, WM_KEYUP, tab), KeyRoute::Field);
+        for msg in [WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_CHAR] {
+            assert_eq!(field_key_route(true, msg, 0x10), KeyRoute::Field, "{msg:#06X}");
+        }
+        // Outside a hotkey field the dialog manager sees everything.
+        let elsewhere = [(WM_KEYDOWN, 0x10), (WM_SYSKEYDOWN, enter), (WM_KEYDOWN, m), (WM_CHAR, m)];
+        for (msg, vk) in elsewhere {
+            assert_eq!(field_key_route(false, msg, vk), KeyRoute::Dialog, "{msg:#06X} {vk:#04X}");
+        }
+    }
+
+    #[test]
+    fn hotkey_from_wm_hotkey_unpacks_mods_and_vk() {
+        // WM_HOTKEY's lParam is MAKELONG(mods, vk): MOD_ALT | MOD_CONTROL (3)
+        // and F24 (0x87).
+        let ctrl_alt_f24 = HotkeySpec { mods: MOD_CONTROL.0 | MOD_ALT.0, vk: 0x87 };
+        assert_eq!(hotkey_from_wm_hotkey(LPARAM(0x0087_0003)), ctrl_alt_f24);
+        // MOD_NOREPEAT (0x4000), which TinyMon registers with, never leaks
+        // into the modifiers.
+        assert_eq!(hotkey_from_wm_hotkey(LPARAM(0x0087_4003)), ctrl_alt_f24);
     }
 
     #[test]

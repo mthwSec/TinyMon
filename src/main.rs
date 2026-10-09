@@ -54,28 +54,29 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, ChangeWindowMessageFilterEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetAncestor,
-    GetClassNameW, GetClientRect, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowRect,
-    IsDialogMessageW, IsWindow, KillTimer, LoadCursorW, MessageBoxW, PostMessageW, PostQuitMessage,
-    RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
-    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TrackPopupMenu, TranslateMessage,
-    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GA_ROOT, GWLP_USERDATA, GWL_EXSTYLE, HICON, HTCAPTION,
-    HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, MB_ICONWARNING, MB_OK, MF_CHECKED, MF_POPUP, MF_SEPARATOR,
-    MF_STRING, MSG, MSGFLT_ALLOW, SM_CXSMICON, SPI_SETWORKAREA, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP,
-    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
+    DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetClassNameW,
+    GetClientRect, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowRect, IsDialogMessageW,
+    IsWindow, KillTimer, LoadCursorW, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW,
+    RegisterWindowMessageW, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TrackPopupMenu, TranslateMessage, CREATESTRUCTW,
+    CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_EXSTYLE, HICON, HTCAPTION, HWND_TOPMOST, IDC_ARROW,
+    LWA_ALPHA, MB_ICONWARNING, MB_OK, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG,
+    MSGFLT_ALLOW, SM_CXSMICON, SPI_SETWORKAREA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE,
+    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
     WM_EXITSIZEMOVE, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_NCHITTEST, WM_NCRBUTTONUP, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
     WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, VK_ESCAPE, VK_RETURN, VK_TAB};
+use windows::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 
 use dpi::Scale;
 use history::{row_ids, History};
 use registry::{build_sources, collect_rows, MetricSource, Row};
 use render::{render_rows, widget_size, win_w, window_height, BG_COLOR, LIGHT, THEME};
 use settings::Settings;
+use settings_win::KeyRoute;
 
 // ---- Layout ----------------------------------------------------------------
 const MARGIN: i32 = 24; // gap from the work area's edges for the first-run spot and snaps
@@ -132,6 +133,9 @@ struct AppState {
     /// placement::after_relayout); a move made only to fit a work area or for
     /// a DPI change does not.
     settings: Settings,
+    /// Which of the settings' hotkeys failed to register, as of the last
+    /// registration (WM_CREATE, or an Apply that changed a hotkey).
+    hk_status: hotkeys::RegisterResult,
     font: HFONT,
     /// Current monitor DPI (96 = 100%); drives all layout scaling.
     dpi: u32,
@@ -413,6 +417,7 @@ fn main() -> Result<()> {
             history: History::default(),
             first_tick_pending: true,
             settings,
+            hk_status: hotkeys::RegisterResult::default(),
             font,
             dpi,
             icon_sm,
@@ -471,31 +476,20 @@ fn main() -> Result<()> {
                 }
             };
             if !sh.0.is_null() && IsWindow(Some(sh)).as_bool() {
-                // While a hotkey-capture control is focused, bypass IsDialogMessageW
-                // so it receives the combo keys (incl. Alt-combinations) being
-                // bound — otherwise IsDialogMessageW eats them as menu mnemonics /
-                // nav. Tab/Enter/Esc are exceptions: Tab moves focus out, Enter
-                // activates OK, Esc closes — none can be part of a valid combo (a
-                // modifier is required), and a combo is captured live from its
-                // modifier+key, so these navigation keys never need to reach the field.
-                let capturing = focused_is_hotkey()
-                    && !(msg.message == WM_KEYDOWN
-                        && (msg.wParam.0 as u16 == VK_TAB.0
-                            || msg.wParam.0 as u16 == VK_RETURN.0
-                            || msg.wParam.0 as u16 == VK_ESCAPE.0));
-                if !capturing {
-                    // Dialog keyboard nav (Tab/Enter/Esc/Space) for settings.
-                    if IsDialogMessageW(sh, &msg).as_bool() {
-                        continue;
-                    }
-                    // Esc closes settings. IsDialogMessageW doesn't map Esc for a
-                    // modeless window, so handle it here for keys it owns.
-                    if msg.message == WM_KEYDOWN
-                        && msg.wParam.0 as u16 == VK_ESCAPE.0
-                        && GetAncestor(msg.hwnd, GA_ROOT).0 == sh.0
-                    {
-                        let _ = DestroyWindow(sh);
-                        continue;
+                // A focused hotkey field gets its keys past IsDialogMessageW,
+                // which would take them as navigation, all but the Tab, Enter
+                // and Esc key-downs; lone modifiers and Alt+Enter, which would
+                // wipe its capture, go nowhere (field_key_route).
+                let vk = msg.wParam.0 as u32;
+                match settings_win::field_key_route(focused_is_hotkey(), msg.message, vk) {
+                    KeyRoute::Drop => continue,
+                    KeyRoute::Field => {}
+                    KeyRoute::Dialog => {
+                        // Dialog keyboard nav (Tab/Enter/Esc/Space) for settings;
+                        // Esc sends IDCANCEL, which closes the window.
+                        if IsDialogMessageW(sh, &msg).as_bool() {
+                            continue;
+                        }
                     }
                 }
             }
@@ -507,8 +501,9 @@ fn main() -> Result<()> {
 }
 
 /// True if the control with keyboard focus (this thread) is a hotkey-capture
-/// control. While one is focused the message loop must NOT run `IsDialogMessageW`,
-/// which would consume the keys the user is trying to bind.
+/// control. While one is focused the message loop routes its keys with
+/// `settings_win::field_key_route`, so that `IsDialogMessageW` does not consume
+/// the keys the user is trying to bind.
 unsafe fn focused_is_hotkey() -> bool {
     let f = GetFocus();
     if f.0.is_null() {
@@ -540,8 +535,9 @@ unsafe extern "system" fn wnd_proc(
             let interval = if p.is_null() { 1000 } else { (*p).settings.interval_ms };
             SetTimer(Some(hwnd), TIMER_ID, first_tick_ms(interval), None);
             if !p.is_null() {
-                // At startup, register silently (no popup if a combo is taken).
-                let _ = hotkeys::register(
+                // At startup, register silently (no popup if a combo is taken),
+                // keeping the result (hk_status).
+                (*p).hk_status = hotkeys::register(
                     hwnd,
                     (*p).settings.hotkey_toggle,
                     (*p).settings.hotkey_settings,
@@ -684,8 +680,18 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
 
-        // Global hotkeys: dispatch to the same actions as the menu.
+        // Global hotkeys: dispatch to the same actions as the menu. A combo
+        // TinyMon owns never reaches a hotkey field of the settings window
+        // (RegisterHotKey takes it first), so while such a field has the focus
+        // the combo goes into it instead and does nothing else. The settings
+        // window is copied out first: capture_fired_hotkey sends messages, and
+        // no AppState reference may be live across it.
         WM_HOTKEY => {
+            let p = state_ptr(hwnd);
+            let sh = if p.is_null() { HWND(core::ptr::null_mut()) } else { (*p).settings_hwnd };
+            if settings_win::capture_fired_hotkey(sh, lparam) {
+                return LRESULT(0);
+            }
             match wparam.0 as i32 {
                 hotkeys::HK_TOGGLE => toggle_visibility(hwnd),
                 hotkeys::HK_SETTINGS => open_settings(hwnd),
@@ -1233,14 +1239,14 @@ unsafe fn apply_settings(hwnd: HWND, new: Settings) -> Option<String> {
         // font (rows + width scale with it): a new font or order always
         // resizes, below; otherwise only a changed row count does.
         let force = order_changed || font_changed;
-        let res = if st.settings.hotkey_toggle != old.hotkey_toggle
-            || st.settings.hotkey_settings != old.hotkey_settings
-        {
+        let hk_changed = st.settings.hotkey_toggle != old.hotkey_toggle
+            || st.settings.hotkey_settings != old.hotkey_settings;
+        if hk_changed {
             hotkeys::unregister(hwnd);
-            Some(hotkeys::register(hwnd, st.settings.hotkey_toggle, st.settings.hotkey_settings))
-        } else {
-            None
-        };
+            st.hk_status =
+                hotkeys::register(hwnd, st.settings.hotkey_toggle, st.settings.hotkey_settings);
+        }
+        let res = hk_changed.then_some(st.hk_status);
         let n = collect_rows(&st.sources, false).0.len();
         (n, force, st.settings.hotkey_toggle, st.settings.hotkey_settings, res)
     };

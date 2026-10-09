@@ -101,7 +101,7 @@ fn vk_to_name(vk: u32) -> String {
 /// Which configured hotkeys failed to register (already taken by another app).
 /// A field is only `true` when that hotkey was requested AND `RegisterHotKey`
 /// failed — so the caller can warn the user about a genuine conflict.
-#[derive(Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct RegisterResult {
     pub toggle_failed: bool,
     pub settings_failed: bool,
