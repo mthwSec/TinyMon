@@ -2141,4 +2141,34 @@ mod tests {
         let both = [key(MOD_CONTROL.0 | MOD_ALT.0, 0x4D); 2];
         assert_eq!(hotkey_notes(both, both, [false, true]), [None, Some(SameAsShowHide)]);
     }
+
+    #[test]
+    fn note_codes_map_back_and_all_lists_every_note() {
+        // Each note's index in ALL (which from_code searches) and whether it
+        // is a warning. The match has no wildcard arm, so a new note fails to
+        // compile until it gets an arm, and its arm, at ALL's next index,
+        // fails to compile until ALL holds it: a constant index past the end
+        // of an array is an error (rustc's unconditional_panic lint).
+        let entry = |n: HotkeyNote| match n {
+            HotkeyNote::BlocksTyping => (HotkeyNote::ALL[0], true),
+            HotkeyNote::PlusWin => (HotkeyNote::ALL[1], false),
+            HotkeyNote::SameAsShowHide => (HotkeyNote::ALL[2], true),
+            HotkeyNote::InUse => (HotkeyNote::ALL[3], true),
+        };
+        for (i, n) in HotkeyNote::ALL.into_iter().enumerate() {
+            // ALL holds each note once, at the index its arm names.
+            let (listed, warning) = entry(n);
+            assert_eq!(listed, n, "{n:?}");
+            assert!(!HotkeyNote::ALL[..i].contains(&n), "{n:?} twice");
+            // The code a note's static keeps in GWLP_USERDATA brings the note
+            // back, and static_text_color paints a warning amber: every note
+            // but the Win one, which shows muted.
+            assert_eq!(HotkeyNote::from_code(n as isize), Some(n), "{n:?}");
+            assert_eq!(n.is_warning(), warning, "{n:?}");
+        }
+        // 0 (no note) and codes no note has: no note, so dark::TEXT.
+        for code in [0, 5, -1] {
+            assert_eq!(HotkeyNote::from_code(code), None, "code {code}");
+        }
+    }
 }
