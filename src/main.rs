@@ -85,8 +85,22 @@ const MARGIN: i32 = 24; // gap from the work area's edges for the first-run spot
 const TIMER_ID: usize = 1;
 const CLASS_NAME: PCWSTR = w!("TinyMonWindow");
 
-// ---- Tray + menu -----------------------------------------------------------
+// ---- Private messages (WM_APP) ---------------------------------------------
+// Every WM_APP id lives here, so none is used twice (wm_app_ids_are_distinct).
+/// The tray icon's callback (add_tray_icon); lParam holds the mouse message.
 const WM_TRAY: u32 = WM_APP + 1;
+/// Posted by `queue_apply` when the settings window applies. The message
+/// carries nothing (wParam is ignored): the settings wait in `PENDING_APPLY`.
+const WM_APP_APPLY: u32 = WM_APP + 2;
+/// Posted by the settings window when it closes; clears the single-instance
+/// slot once that window is gone.
+pub(crate) const WM_APP_SETTINGS_CLOSED: u32 = WM_APP + 3;
+/// Posted by `apply_settings` to the open settings window after an Apply,
+/// which may have registered the hotkeys again: the notes beside its hotkey
+/// fields show which failed (`hotkey_status`).
+pub(crate) const WM_APP_HOTKEY_STATUS: u32 = WM_APP + 5;
+
+// ---- Tray + menu -----------------------------------------------------------
 /// Window moved to a monitor with different DPI scaling.
 const WM_DPICHANGED: u32 = 0x02E0;
 const TRAY_UID: u32 = 1;
@@ -110,12 +124,6 @@ const ID_SNAP_TR: usize = 7;
 const ID_SNAP_BL: usize = 8;
 const ID_SNAP_BR: usize = 9;
 const ID_THEME: usize = 10;
-/// Posted by `queue_apply` when the settings window applies. The message
-/// carries nothing (wParam is ignored): the settings wait in `PENDING_APPLY`.
-const WM_APP_APPLY: u32 = WM_APP + 2;
-/// Posted by the settings window when it closes; clears the single-instance
-/// slot once that window is gone.
-pub(crate) const WM_APP_SETTINGS_CLOSED: u32 = WM_APP + 3;
 
 /// Per-window state, owned via GWLP_USERDATA for the window's lifetime.
 struct AppState {
@@ -134,7 +142,9 @@ struct AppState {
     /// a DPI change does not.
     settings: Settings,
     /// Which of the settings' hotkeys failed to register, as of the last
-    /// registration (WM_CREATE, or an Apply that changed a hotkey).
+    /// registration (WM_CREATE, or an Apply that changed a combo or retried
+    /// a failed one: hotkeys::should_register). The settings window's notes
+    /// read it through hotkey_status.
     hk_status: hotkeys::RegisterResult,
     font: HFONT,
     /// Current monitor DPI (96 = 100%); drives all layout scaling.
@@ -1196,14 +1206,16 @@ pub(crate) unsafe fn queue_apply(main: HWND, new: Settings) -> bool {
 /// Apply new settings in a fixed order: every AppState change under one short
 /// borrow, then the resize after it (SetWindowPos sends messages to the widget,
 /// and no AppState reference may be live across such a call), then persist,
-/// last, so a home the resize moved is saved. Returns the hotkey warning,
-/// which the caller shows with no AppState reference live.
+/// after the resize, so a home the resize moved is saved, then a post to an
+/// open settings window, whose hotkey notes follow the new registration.
+/// Returns the hotkey warning, which the caller shows with no AppState
+/// reference live.
 unsafe fn apply_settings(hwnd: HWND, new: Settings) -> Option<String> {
     let p = state_ptr(hwnd);
     if p.is_null() {
         return None;
     }
-    let (n, force, toggle, settings, res) = {
+    let (n, force, toggle, settings, warn, sh) = {
         let st = &mut *p;
         // The settings window never moves the widget: keep its home.
         let pos = st.settings.pos;
@@ -1239,16 +1251,23 @@ unsafe fn apply_settings(hwnd: HWND, new: Settings) -> Option<String> {
         // font (rows + width scale with it): a new font or order always
         // resizes, below; otherwise only a changed row count does.
         let force = order_changed || font_changed;
-        let hk_changed = st.settings.hotkey_toggle != old.hotkey_toggle
-            || st.settings.hotkey_settings != old.hotkey_settings;
-        if hk_changed {
+        // The hotkeys register again when a combo changed, or to retry one
+        // that failed before (should_register). The warning names only the
+        // combos this Apply changed (to_warn): an unchanged one that still
+        // fails shows only as its note in the settings window.
+        let changed = [
+            st.settings.hotkey_toggle != old.hotkey_toggle,
+            st.settings.hotkey_settings != old.hotkey_settings,
+        ];
+        if hotkeys::should_register(changed, st.hk_status) {
             hotkeys::unregister(hwnd);
             st.hk_status =
                 hotkeys::register(hwnd, st.settings.hotkey_toggle, st.settings.hotkey_settings);
         }
-        let res = hk_changed.then_some(st.hk_status);
+        let warn = hotkeys::to_warn(st.hk_status, changed);
         let n = collect_rows(&st.sources, false).0.len();
-        (n, force, st.settings.hotkey_toggle, st.settings.hotkey_settings, res)
+        let (toggle, settings) = (st.settings.hotkey_toggle, st.settings.hotkey_settings);
+        (n, force, toggle, settings, warn, st.settings_hwnd)
     };
     // Anchored to the widget's nearest corner; home follows unless the work
     // area clamps the widget or it is displaced (saved below either way).
@@ -1257,8 +1276,12 @@ unsafe fn apply_settings(hwnd: HWND, new: Settings) -> Option<String> {
     if !p.is_null() {
         persist(&*p);
     }
+    // An open settings window refreshes its hotkey notes (hotkey_status).
+    if IsWindow(Some(sh)).as_bool() {
+        let _ = PostMessageW(Some(sh), WM_APP_HOTKEY_STATUS, WPARAM(0), LPARAM(0));
+    }
     let _ = InvalidateRect(Some(hwnd), None, false);
-    res.and_then(|r| hotkeys::conflict_message(toggle, settings, &r))
+    hotkeys::conflict_message(toggle, settings, &warn)
 }
 
 /// Show an Apply warning (a hotkey that could not be registered) in a modal
@@ -1283,6 +1306,17 @@ pub(crate) unsafe fn current_settings(hwnd: HWND) -> Settings {
         Settings::from_config(&config::Config::default())
     } else {
         (*p).settings.clone()
+    }
+}
+
+/// Which hotkeys failed to register, as of the last registration: a copy, read
+/// by the settings window for its notes (no failures while there is no state).
+pub(crate) unsafe fn hotkey_status(hwnd: HWND) -> hotkeys::RegisterResult {
+    let p = state_ptr(hwnd);
+    if p.is_null() {
+        hotkeys::RegisterResult::default()
+    } else {
+        (*p).hk_status
     }
 }
 
@@ -1522,5 +1556,16 @@ mod tests {
         // icon): the next click still toggles.
         let msgs = [WM_LBUTTONDOWN, WM_LBUTTONUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP];
         assert_eq!(tray_toggles(&msgs), 2);
+    }
+
+    #[test]
+    fn wm_app_ids_are_distinct() {
+        let ids = [WM_TRAY, WM_APP_APPLY, WM_APP_SETTINGS_CLOSED, WM_APP_HOTKEY_STATUS];
+        for (i, id) in ids.iter().enumerate() {
+            // In the WM_APP range, below the registered messages (such as
+            // TaskbarCreated), and each used once.
+            assert!((WM_APP..0xC000).contains(id), "{id:#06X}");
+            assert!(!ids[i + 1..].contains(id), "{id:#06X} twice");
+        }
     }
 }

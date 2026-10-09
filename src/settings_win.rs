@@ -5,7 +5,10 @@
 //! It seeds its controls from `current_settings(main)` and, on Apply/OK, builds
 //! a fresh `Settings` (clamped via `Settings::from_config`) and hands it to the
 //! main window with `queue_apply`, which keeps it in a UI-thread slot and posts
-//! a bare `WM_APP_APPLY`. Closing posts `WM_APP_SETTINGS_CLOSED` (it never quits
+//! a bare `WM_APP_APPLY`; one combo for both hotkeys is refused, and OK then
+//! stays open. After an Apply the main window posts `WM_APP_HOTKEY_STATUS`, and
+//! the notes beside the hotkey fields show which combos failed to register
+//! (`hotkey_status`). Closing posts `WM_APP_SETTINGS_CLOSED` (it never quits
 //! the app).
 //!
 //! Keyboard navigation (Tab between fields, Esc = Cancel, Space toggles a
@@ -64,7 +67,10 @@ use crate::placement::{fit_into, work_area_near};
 use crate::registry::{sample_rows, MetricKey};
 use crate::render::{render_rows, win_w, window_height, LIGHT, THEME};
 use crate::settings::{Settings, MAX_FONT_PX, MAX_INTERVAL_MS, MIN_FONT_PX, MIN_INTERVAL_MS};
-use crate::{create_mono_font, current_settings, queue_apply, WM_APP_SETTINGS_CLOSED};
+use crate::{
+    create_mono_font, current_settings, hotkey_status, queue_apply, WM_APP_HOTKEY_STATUS,
+    WM_APP_SETTINGS_CLOSED,
+};
 
 const CLASS: PCWSTR = w!("TinyMonSettings");
 const TBM_GETPOS: u32 = 1024; // WM_USER+0 (not exposed as a named const in 0.62)
@@ -595,11 +601,17 @@ unsafe extern "system" fn settings_proc(
             let notif = ((wparam.0 >> 16) & 0xFFFF) as u32;
             let n = MetricKey::ALL.len() as i32;
             match id {
+                // OK closes the window once the settings are handed over:
+                // apply refuses one combo for both hotkeys. Apply leaves the
+                // window open either way.
                 IDOK => {
-                    apply(hwnd);
-                    let _ = DestroyWindow(hwnd);
+                    if apply(hwnd) {
+                        let _ = DestroyWindow(hwnd);
+                    }
                 }
-                IDC_APPLY => apply(hwnd),
+                IDC_APPLY => {
+                    apply(hwnd);
+                }
                 IDCANCEL => {
                     let _ = DestroyWindow(hwnd);
                 }
@@ -650,6 +662,13 @@ unsafe extern "system" fn settings_proc(
                 }
                 _ => {}
             }
+            LRESULT(0)
+        }
+
+        // The widget applied settings and may have registered the hotkeys
+        // again: the notes show which of them failed (hotkey_status).
+        WM_APP_HOTKEY_STATUS => {
+            refresh_hotkey_notes(hwnd);
             LRESULT(0)
         }
 
@@ -1245,11 +1264,13 @@ unsafe fn trackbar_customdraw(cd: &NMCUSTOMDRAW) -> LRESULT {
 
 /// Read the controls, build a clamped `Settings`, show its interval and font
 /// in their edits, and hand it to the main window (`queue_apply`: nothing is
-/// left behind if the post fails).
-unsafe fn apply(hwnd: HWND) {
+/// left behind if the post fails). One combo for both hotkeys is refused
+/// (same_combo): the notes say so, the focus goes to the Open settings field,
+/// and nothing is handed over. Returns whether the settings were handed over.
+unsafe fn apply(hwnd: HWND) -> bool {
     let main = HWND(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut c_void);
     if main.0.is_null() {
-        return;
+        return false;
     }
     let cur = current_settings(main);
 
@@ -1286,7 +1307,16 @@ unsafe fn apply(hwnd: HWND) {
             set_text(e, &value.to_string());
         }
     }
-    queue_apply(main, new);
+    // One combo cannot serve both actions: its second registration would
+    // fail. Nothing is applied until one of the two fields changes.
+    if same_combo(hk_toggle, hk_settings) {
+        refresh_hotkey_notes(hwnd);
+        if let Ok(f) = GetDlgItem(Some(hwnd), IDC_HK_SETTINGS) {
+            let _ = SetFocus(Some(f));
+        }
+        return false;
+    }
+    queue_apply(main, new)
 }
 
 /// Clear a hotkey capture field (so the user can remove a binding).
@@ -1382,14 +1412,17 @@ pub unsafe fn capture_fired_hotkey(settings: HWND, lparam: LPARAM) -> bool {
     true
 }
 
-/// Show each hotkey field's note (hotkey_notes, against the saved combos) in
-/// the static on its label's row, and keep the note's kind in that static's
-/// GWLP_USERDATA (0 for none), which WM_CTLCOLORSTATIC colours it by.
+/// Show each hotkey field's note (hotkey_notes, against the saved combos and
+/// which of them failed to register, hotkey_status) in the static on its
+/// label's row, and keep the note's kind in that static's GWLP_USERDATA (0 for
+/// none), which WM_CTLCOLORSTATIC colours it by.
 unsafe fn refresh_hotkey_notes(hwnd: HWND) {
     let main = HWND(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut c_void);
     let cur = current_settings(main);
+    let status = hotkey_status(main);
     let fields = [read_hotkey(hwnd, IDC_HK_TOGGLE), read_hotkey(hwnd, IDC_HK_SETTINGS)];
-    let notes = hotkey_notes(fields, [cur.hotkey_toggle, cur.hotkey_settings]);
+    let saved = [cur.hotkey_toggle, cur.hotkey_settings];
+    let notes = hotkey_notes(fields, saved, [status.toggle_failed, status.settings_failed]);
     for (id, note) in [IDC_HK_TOGGLE_NOTE, IDC_HK_SETTINGS_NOTE].into_iter().zip(notes) {
         if let Ok(st) = GetDlgItem(Some(hwnd), id) {
             SetWindowLongPtrW(st, GWLP_USERDATA, note.map_or(0, |n| n as isize));
@@ -1484,6 +1517,12 @@ fn effective_hotkey(saved: Option<HotkeySpec>, field: Option<HotkeySpec>) -> Opt
     field
 }
 
+/// Whether the two actions would get one and the same combo, which apply()
+/// refuses: a combo registers for one hotkey only. Empty fields bind nothing.
+fn same_combo(a: Option<HotkeySpec>, b: Option<HotkeySpec>) -> bool {
+    a.is_some() && a == b
+}
+
 /// A note at the right end of a hotkey field's label row (hotkey_notes). Its
 /// value is the code the note's static keeps in GWLP_USERDATA (0: no note).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1493,22 +1532,36 @@ enum HotkeyNote {
     BlocksTyping = 1,
     /// The combo has Win, which the field cannot show (set in the config).
     PlusWin = 2,
+    /// The Open settings combo is the Show / Hide one (same_combo), which
+    /// Apply and OK refuse.
+    SameAsShowHide = 3,
+    /// The saved combo failed to register (almost always because another app
+    /// holds it), and the field still holds it.
+    InUse = 4,
 }
 
 impl HotkeyNote {
     /// Every note, for from_code.
-    const ALL: [HotkeyNote; 2] = [HotkeyNote::BlocksTyping, HotkeyNote::PlusWin];
+    const ALL: [HotkeyNote; 4] = [
+        HotkeyNote::BlocksTyping,
+        HotkeyNote::PlusWin,
+        HotkeyNote::SameAsShowHide,
+        HotkeyNote::InUse,
+    ];
 
     fn text(self) -> &'static str {
         match self {
             HotkeyNote::BlocksTyping => "Blocks typing this key",
             HotkeyNote::PlusWin => "+ Win (set in config)",
+            HotkeyNote::SameAsShowHide => "Same as Show / Hide",
+            HotkeyNote::InUse => "In use by another app",
         }
     }
 
-    /// A warning shows amber (dark::WARN), any other note muted.
+    /// A warning shows amber (dark::WARN): every note but the Win one, which
+    /// shows muted.
     fn is_warning(self) -> bool {
-        self == HotkeyNote::BlocksTyping
+        self != HotkeyNote::PlusWin
     }
 
     /// The note whose code a note's static keeps (None for 0, or any other).
@@ -1518,16 +1571,25 @@ impl HotkeyNote {
 }
 
 /// The notes for the Show / Hide and Open settings fields, from what the
-/// `fields` read and the `saved` combos, judged on the combo Apply would save
-/// for each (effective_hotkey): a key that types text, bare or with Shift
-/// only, blocks typing it; a combo with Win gets the Win the field cannot show.
+/// `fields` read, the `saved` combos and which of those `failed` to register,
+/// judged on the combo Apply would save for each (effective_hotkey). By rank:
+/// the Open settings combo is the Show / Hide one (same_combo); the saved
+/// combo failed to register and the field still holds it; a key that types
+/// text, bare or with Shift only, blocks typing it; a combo with Win gets the
+/// Win the field cannot show.
 fn hotkey_notes(
     fields: [Option<HotkeySpec>; 2],
     saved: [Option<HotkeySpec>; 2],
+    failed: [bool; 2],
 ) -> [Option<HotkeyNote>; 2] {
+    let combos = [effective_hotkey(saved[0], fields[0]), effective_hotkey(saved[1], fields[1])];
     let note = |i: usize| {
-        let spec = effective_hotkey(saved[i], fields[i])?;
-        if blocks_typing(spec) {
+        let spec = combos[i]?;
+        if i == 1 && same_combo(combos[0], combos[1]) {
+            Some(HotkeyNote::SameAsShowHide)
+        } else if failed[i] && combos[i] == saved[i] {
+            Some(HotkeyNote::InUse)
+        } else if blocks_typing(spec) {
             Some(HotkeyNote::BlocksTyping)
         } else if spec.mods & MOD_WIN.0 != 0 {
             Some(HotkeyNote::PlusWin)
@@ -1966,32 +2028,85 @@ mod tests {
     fn owner_brackets_and_win_get_notes() {
         use HotkeyNote::{BlocksTyping, PlusWin};
         let key = |mods: u32, vk: u32| Some(HotkeySpec { mods, vk });
+        // Neither combo failed to register.
+        let ok = [false, false];
         // The owner's bare "]" (Show / Hide) and "[" (Open settings), saved
         // and in the fields: both keys no longer type anywhere.
         let brackets = [key(0, 0xDD), key(0, 0xDB)];
-        assert_eq!(hotkey_notes(brackets, brackets), [Some(BlocksTyping), Some(BlocksTyping)]);
+        assert_eq!(hotkey_notes(brackets, brackets, ok), [Some(BlocksTyping), Some(BlocksTyping)]);
         // A saved Win+T, which the field shows as T: the note adds the Win.
         let win_t = [key(MOD_WIN.0, 0x54), None];
-        assert_eq!(hotkey_notes([key(0, 0x54), None], win_t), [Some(PlusWin), None]);
+        assert_eq!(hotkey_notes([key(0, 0x54), None], win_t, ok), [Some(PlusWin), None]);
         // A shortcut and a key that types nothing: no notes.
         let quiet = [key(MOD_CONTROL.0 | MOD_ALT.0, 0x4D), key(0, 0x77)];
-        assert_eq!(hotkey_notes(quiet, quiet), [None, None]);
+        assert_eq!(hotkey_notes(quiet, quiet, ok), [None, None]);
         // Shift and a typing key still type: a note.
         let shifted = [key(MOD_SHIFT.0, 0xDB), key(0, 0x77)];
-        assert_eq!(hotkey_notes(shifted, shifted), [Some(BlocksTyping), None]);
+        assert_eq!(hotkey_notes(shifted, shifted, ok), [Some(BlocksTyping), None]);
     }
 
     #[test]
     fn notes_follow_the_combo_apply_would_save() {
         let key = |mods: u32, vk: u32| Some(HotkeySpec { mods, vk });
+        // Neither combo failed to register.
+        let ok = [false, false];
         // The saved Win+T's field now reads Ctrl+T: Apply saves Ctrl+T, so
         // the Win note goes.
         let win_t = [key(MOD_WIN.0, 0x54), None];
-        assert_eq!(hotkey_notes([key(MOD_CONTROL.0, 0x54), None], win_t), [None, None]);
+        assert_eq!(hotkey_notes([key(MOD_CONTROL.0, 0x54), None], win_t, ok), [None, None]);
         // A saved "]" whose field was cleared: Apply unbinds it, so no note;
         // a "]" typed into a field that was empty: a note at once.
-        assert_eq!(hotkey_notes([None, None], [key(0, 0xDD), None]), [None, None]);
-        let typed = hotkey_notes([None, key(0, 0xDD)], [None, None]);
+        assert_eq!(hotkey_notes([None, None], [key(0, 0xDD), None], ok), [None, None]);
+        let typed = hotkey_notes([None, key(0, 0xDD)], [None, None], ok);
         assert_eq!(typed, [None, Some(HotkeyNote::BlocksTyping)]);
+    }
+
+    #[test]
+    fn same_combo_for_both_actions_is_rejected() {
+        let ctrl_alt = MOD_CONTROL.0 | MOD_ALT.0;
+        let x = Some(HotkeySpec { mods: ctrl_alt, vk: 0x4D });
+        let y = Some(HotkeySpec { mods: ctrl_alt, vk: 0x53 });
+        assert!(same_combo(x, x));
+        // Two empty fields bind nothing, so nothing clashes; nor do a combo
+        // and an empty field, or two different combos.
+        assert!(!same_combo(None, None));
+        assert!(!same_combo(x, None));
+        assert!(!same_combo(x, y));
+    }
+
+    #[test]
+    fn notes_rank_conflict_then_registration_then_typing() {
+        use HotkeyNote::{InUse, SameAsShowHide};
+        let key = |mods: u32, vk: u32| Some(HotkeySpec { mods, vk });
+        let (ctrl_alt_m, bracket) = (key(MOD_CONTROL.0 | MOD_ALT.0, 0x4D), key(0, 0xDD));
+        // One combo in both fields: the second field's note says so.
+        let both = [ctrl_alt_m, ctrl_alt_m];
+        assert_eq!(hotkey_notes(both, [None, None], [false, false]), [None, Some(SameAsShowHide)]);
+        // The saved "]" failed to register and its field still holds it: in
+        // use, which outranks blocking typing.
+        let failed = [true, false];
+        assert_eq!(hotkey_notes([bracket, None], [bracket, None], failed), [Some(InUse), None]);
+        // The field holds another combo now: the failure was the old combo's.
+        assert_eq!(hotkey_notes([ctrl_alt_m, None], [bracket, None], failed), [None, None]);
+        // No combos: no notes, whatever the flags say.
+        assert_eq!(hotkey_notes([None, None], [None, None], [true, true]), [None, None]);
+    }
+
+    #[test]
+    fn conflict_notes_follow_the_combos_apply_would_save() {
+        use HotkeyNote::{BlocksTyping, InUse, PlusWin, SameAsShowHide};
+        let key = |mods: u32, vk: u32| Some(HotkeySpec { mods, vk });
+        // A saved Win+E failed to register. Its untouched field reads E, yet
+        // Apply would keep Win+E (effective_hotkey): the field still holds it.
+        let win_e = [key(MOD_WIN.0, 0x45), None];
+        assert_eq!(hotkey_notes([key(0, 0x45), None], win_e, [true, false]), [Some(InUse), None]);
+        // E in the other field as well: Apply would save Win+E and E, which
+        // differ, so nothing clashes.
+        let es = [key(0, 0x45), key(0, 0x45)];
+        assert_eq!(hotkey_notes(es, win_e, [false, false]), [Some(PlusWin), Some(BlocksTyping)]);
+        // A config with one combo for both: its second registration fails,
+        // and the clash outranks the failure.
+        let both = [key(MOD_CONTROL.0 | MOD_ALT.0, 0x4D); 2];
+        assert_eq!(hotkey_notes(both, both, [false, true]), [None, Some(SameAsShowHide)]);
     }
 }

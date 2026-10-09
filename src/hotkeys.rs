@@ -132,6 +132,30 @@ pub struct RegisterResult {
     pub settings_failed: bool,
 }
 
+impl RegisterResult {
+    /// Whether either hotkey failed to register.
+    pub fn any_failed(self) -> bool {
+        self.toggle_failed || self.settings_failed
+    }
+}
+
+/// Whether an Apply registers the hotkeys again: when a combo changed
+/// (`changed`: Show / Hide, Open settings), and also when one failed last time
+/// (`status`), so that a combo another app held at startup is retried.
+pub fn should_register(changed: [bool; 2], status: RegisterResult) -> bool {
+    changed[0] || changed[1] || status.any_failed()
+}
+
+/// The failures of `res` an Apply warns about: only those of the combos it
+/// changed (`changed`). An unchanged combo that still fails is shown only by
+/// its note in the settings window.
+pub fn to_warn(res: RegisterResult, changed: [bool; 2]) -> RegisterResult {
+    RegisterResult {
+        toggle_failed: res.toggle_failed && changed[0],
+        settings_failed: res.settings_failed && changed[1],
+    }
+}
+
 /// Register the configured hotkeys on `hwnd` (best-effort), reporting any that a
 /// conflict prevented registering.
 pub unsafe fn register(
@@ -164,8 +188,9 @@ pub unsafe fn unregister(hwnd: HWND) {
 }
 
 /// The warning shown after an Apply: one line for each configured hotkey that
-/// failed to register (almost always because another app owns the combo), or
-/// `None` when there is nothing to list.
+/// `res` reports as failed (almost always because another app owns the combo;
+/// an Apply passes only the combos it changed, to_warn), or `None` when there
+/// is nothing to list.
 pub fn conflict_message(
     toggle: Option<HotkeySpec>,
     settings: Option<HotkeySpec>,
@@ -312,5 +337,36 @@ mod tests {
         for spec in [key(ctrl, 0xDD), key(alt, 0x54), key(win, 0x54), key(0, 0x77), key(0, 0x25)] {
             assert!(!blocks_typing(spec), "{spec:?}");
         }
+    }
+
+    #[test]
+    fn failed_startup_hotkey_is_retried_on_apply() {
+        let toggle_failed = RegisterResult { toggle_failed: true, settings_failed: false };
+        // Neither combo changed, but Show / Hide failed to register (at
+        // startup, say): the Apply registers again, in case it is free now.
+        assert!(should_register([false, false], toggle_failed));
+        // Nothing changed and nothing failed: nothing to do.
+        assert!(!should_register([false, false], RegisterResult::default()));
+        // A changed combo is always registered.
+        assert!(should_register([true, false], RegisterResult::default()));
+    }
+
+    #[test]
+    fn warn_only_about_changed_combos() {
+        let both = RegisterResult { toggle_failed: true, settings_failed: true };
+        let toggle = RegisterResult { toggle_failed: true, settings_failed: false };
+        let settings = RegisterResult { toggle_failed: false, settings_failed: true };
+        // Both failed, but only Open settings changed: Show / Hide failed
+        // before as well, and its note already says so.
+        assert_eq!(to_warn(both, [false, true]), settings);
+        // Both changed, and only Show / Hide failed.
+        assert_eq!(to_warn(toggle, [true, true]), toggle);
+    }
+
+    #[test]
+    fn register_result_any_failed() {
+        assert!(!RegisterResult::default().any_failed());
+        assert!(RegisterResult { toggle_failed: true, settings_failed: false }.any_failed());
+        assert!(RegisterResult { toggle_failed: false, settings_failed: true }.any_failed());
     }
 }
