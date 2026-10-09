@@ -26,9 +26,10 @@ use windows::Win32::Graphics::Gdi::{
     AlphaBlend, BeginPaint, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontIndirectW,
     CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect,
     GetStockObject, InvalidateRect, Polyline, RoundRect, SelectObject, SetBkColor, SetBkMode,
-    SetDCBrushColor, SetTextColor, BLENDFUNCTION, CLEARTYPE_QUALITY, DC_BRUSH, DRAW_TEXT_FORMAT,
-    DT_CENTER, DT_LEFT, DT_SINGLELINE, DT_VCENTER, HBRUSH, HDC, HFONT, HGDIOBJ, LOGFONTW,
-    NULL_BRUSH, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
+    SetBrushOrgEx, SetDCBrushColor, SetStretchBltMode, SetTextColor, StretchBlt, BLENDFUNCTION,
+    CLEARTYPE_QUALITY, DC_BRUSH, DRAW_TEXT_FORMAT, DT_CENTER, DT_LEFT, DT_SINGLELINE, DT_VCENTER,
+    HALFTONE, HBRUSH, HDC, HFONT, HGDIOBJ, LOGFONTW, NULL_BRUSH, PAINTSTRUCT, PS_SOLID, SRCCOPY,
+    TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
@@ -61,7 +62,7 @@ use crate::dpi::{dpi_for_window, Scale};
 use crate::hotkeys::{format_hotkey, HotkeySpec};
 use crate::placement::{fit_into, work_area_near};
 use crate::registry::{sample_rows, MetricKey};
-use crate::render::{render_rows, window_height, LIGHT, THEME};
+use crate::render::{render_rows, win_w, window_height, LIGHT, THEME};
 use crate::settings::{Settings, DEFAULT_FONT_PX, MAX_FONT_PX, MIN_FONT_PX};
 use crate::{create_mono_font, current_settings, queue_apply, WM_APP_SETTINGS_CLOSED};
 
@@ -200,7 +201,9 @@ unsafe fn free_fonts() {
 
 const CLIENT_W: i32 = 280; // left controls column
 const GUTTER: i32 = 12;
-const PREVIEW_W: i32 = 210;
+/// The preview column. Its pane (PREVIEW_W - 20 wide, less a 1 px border on
+/// each side) holds the widest widget, at MAX_FONT_PX, 1:1 at every scale.
+const PREVIEW_W: i32 = 270;
 const CLIENT_W_TOTAL: i32 = CLIENT_W + GUTTER + PREVIEW_W;
 const PREVIEW_CLASS: PCWSTR = w!("TinyMonPreview");
 
@@ -828,16 +831,40 @@ unsafe extern "system" fn preview_proc(
     }
 }
 
+/// Where the preview puts a widget of `nat_w` x `nat_h` device pixels in a
+/// pane of `pane_w` x `pane_h`: (x, y, w, h). 1:1 in the middle when it fits;
+/// else scaled down uniformly to the pane's width or height, whichever limits
+/// it, and centred the other way. All zero for an empty widget.
+fn fit_preview(nat_w: i32, nat_h: i32, pane_w: i32, pane_h: i32) -> (i32, i32, i32, i32) {
+    if nat_w <= 0 || nat_h <= 0 {
+        return (0, 0, 0, 0);
+    }
+    // The aspect ratios compare by cross-multiplying, in i64 so no product
+    // can overflow.
+    let (nw, nh, pw, ph) = (nat_w as i64, nat_h as i64, pane_w as i64, pane_h as i64);
+    let (w, h) = if nat_w <= pane_w && nat_h <= pane_h {
+        (nat_w, nat_h)
+    } else if nw * ph >= nh * pw {
+        (pane_w, (nh * pw / nw) as i32)
+    } else {
+        ((nw * ph / nh) as i32, pane_h)
+    };
+    ((pane_w - w) / 2, (pane_h - h) / 2, w, h)
+}
+
 /// Render a faithful mini-widget from the parent settings' live control values,
 /// using the SAME `render_rows` as the real widget, dimmed by the opacity slider.
+/// It is the widget at its true size, with every row (so never a "+N"): 1:1
+/// in the middle of the pane, or scaled down to fit a pane it outgrows
+/// (fit_preview).
 unsafe fn paint_preview(hwnd: HWND) {
     let parent = GetParent(hwnd).unwrap_or_default();
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(hwnd, &mut ps);
     let mut rc = RECT::default();
     let _ = GetClientRect(hwnd, &mut rc);
-    let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
-    if w > 0 && h > 0 && !parent.0.is_null() {
+    let (pane_w, pane_h) = (rc.right - rc.left, rc.bottom - rc.top);
+    if pane_w > 0 && pane_h > 0 && !parent.0.is_null() {
         // Enabled order from the parent's checkboxes.
         let order = enabled_order();
         let rows = sample_rows(&order);
@@ -847,16 +874,16 @@ unsafe fn paint_preview(hwnd: HWND) {
         let scale = Scale(dpi_for_window(hwnd));
         let font = create_mono_font(scale, font_px);
 
-        // The mini-widget's natural height; render it that tall and center it in
-        // the (taller) pane so it doesn't sit atop a large empty void.
-        let ch = window_height(scale, rows.len() as i32, font_px).min(h);
-        let y_off = ((h - ch) / 2).max(0);
+        // The widget's true size, as tall as its rows need (no cap), and the
+        // spot and size it gets in the pane.
+        let (w, h) = (win_w(scale, font_px), window_height(scale, rows.len() as i32, font_px));
+        let (x, y, fit_w, fit_h) = fit_preview(w, h, pane_w, pane_h);
 
         // Render the widget into an off-screen buffer, fill the pane with the
-        // widget bg, then blend the content (centered) at the chosen opacity
-        // (simulating the layered widget's translucency over its own bg).
+        // widget bg, then blend the content at the chosen opacity (simulating
+        // the layered widget's translucency over its own bg).
         let mem = CreateCompatibleDC(Some(hdc));
-        let bmp = CreateCompatibleBitmap(hdc, w, ch);
+        let bmp = CreateCompatibleBitmap(hdc, w, h);
         let prev = SelectObject(mem, HGDIOBJ(bmp.0));
         // Representative history so the preview shows sparklines like the widget
         // (the live widget accumulates real history per tick).
@@ -873,7 +900,7 @@ unsafe fn paint_preview(hwnd: HWND) {
         let main = HWND(GetWindowLongPtrW(parent, GWLP_USERDATA) as *mut c_void);
         let theme = if !main.0.is_null() && current_settings(main).light { &LIGHT } else { &THEME };
         let hist: Vec<&[f32]> = preview_hist.iter().map(Vec::as_slice).collect();
-        render_rows(mem, w, ch, &rows, font, scale, font_px, theme, &hist);
+        render_rows(mem, w, h, &rows, font, scale, font_px, theme, &hist);
         SetDCBrushColor(hdc, COLORREF(theme.bg));
         FillRect(hdc, &rc, HBRUSH(GetStockObject(DC_BRUSH).0));
         let bf = BLENDFUNCTION {
@@ -882,7 +909,23 @@ unsafe fn paint_preview(hwnd: HWND) {
             SourceConstantAlpha: opacity,
             AlphaFormat: 0,
         };
-        let _ = AlphaBlend(hdc, 0, y_off, w, ch, mem, 0, 0, w, ch, bf);
+        if (fit_w, fit_h) == (w, h) {
+            let _ = AlphaBlend(hdc, x, y, w, h, mem, 0, 0, w, h, bf);
+        } else {
+            // Scaled down: HALFTONE into a second buffer, which AlphaBlend then
+            // blends 1:1 (stretching in AlphaBlend itself would use
+            // COLORONCOLOR, which leaves the text jagged).
+            let small = CreateCompatibleDC(Some(hdc));
+            let sbmp = CreateCompatibleBitmap(hdc, fit_w, fit_h);
+            let sprev = SelectObject(small, HGDIOBJ(sbmp.0));
+            SetStretchBltMode(small, HALFTONE);
+            let _ = SetBrushOrgEx(small, 0, 0, None);
+            let _ = StretchBlt(small, 0, 0, fit_w, fit_h, Some(mem), 0, 0, w, h, SRCCOPY);
+            let _ = AlphaBlend(hdc, x, y, fit_w, fit_h, small, 0, 0, fit_w, fit_h, bf);
+            SelectObject(small, sprev);
+            let _ = DeleteObject(HGDIOBJ(sbmp.0));
+            let _ = DeleteDC(small);
+        }
 
         SelectObject(mem, prev);
         let _ = DeleteObject(HGDIOBJ(bmp.0));
@@ -1675,5 +1718,30 @@ mod tests {
         }
         let ok = control_places(10).into_iter().find(|p| p.id == IDOK).expect("OK");
         assert_eq!(ok.scaled(Scale(120)), (130, 670, 65, 33));
+    }
+
+    #[test]
+    fn preview_pane_fits_the_widest_widget_at_any_dpi() {
+        for n in [9, 10] {
+            let pane = control_places(n).into_iter().find(|p| p.id == IDC_PREVIEW).expect("pane");
+            for dpi in [96, 120, 144, 168, 192] {
+                let s = Scale(dpi);
+                // The pane's client area: its Place less a 1 px border each side.
+                let (inner, widest) = (s.px(pane.w) - 2, win_w(s, MAX_FONT_PX));
+                assert!(inner >= widest, "{dpi} dpi: pane {inner} < widget {widest}");
+            }
+        }
+    }
+
+    #[test]
+    fn fit_preview_centers_or_scales_uniformly() {
+        // A widget that fits the 248 x 528 pane: 1:1, in the middle.
+        assert_eq!(fit_preview(200, 221, 248, 528), (24, 153, 200, 221));
+        // Too tall: down to the pane's height, the width in proportion.
+        assert_eq!(fit_preview(246, 624, 248, 528), (20, 0, 208, 528));
+        // Too wide: down to the pane's width, the height in proportion.
+        assert_eq!(fit_preview(300, 100, 248, 528), (0, 223, 248, 82));
+        // Nothing to show.
+        assert_eq!(fit_preview(0, 10, 248, 528), (0, 0, 0, 0));
     }
 }

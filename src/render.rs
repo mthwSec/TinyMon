@@ -1,9 +1,9 @@
 //! Shared widget renderer + layout math.
 //!
-//! Both the always-on-top widget and (later) the settings live-preview draw
-//! through [`render_rows`], so the preview can never visually drift from the
-//! real widget. All sizes are authored in logical (96-dpi) units and converted
-//! to device pixels via [`Scale`].
+//! Both the always-on-top widget and the settings live preview draw through
+//! [`render_rows`], the preview at the widget's true size, so the preview can
+//! never visually drift from the real widget. All sizes are authored in
+//! logical (96-dpi) units and converted to device pixels via [`Scale`].
 
 use windows::Win32::Foundation::{COLORREF, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
