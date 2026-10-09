@@ -39,6 +39,7 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, MapVirtualKeyW, SetFocus, MAPVK_VK_TO_VSC_EX, MOD_ALT, MOD_CONTROL, MOD_SHIFT,
+    MOD_WIN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetDlgCtrlID, GetDlgItem,
@@ -978,8 +979,9 @@ unsafe fn apply(hwnd: HWND) {
     let interval = read_edit_u32(hwnd, IDC_INTERVAL, cur.interval_ms);
     let font = read_edit_u32(hwnd, IDC_FONT, cur.font_px as u32) as i32;
 
-    let hk_toggle = read_hotkey(hwnd, IDC_HK_TOGGLE);
-    let hk_settings = read_hotkey(hwnd, IDC_HK_SETTINGS);
+    // The fields cannot show Win: a saved Win combo survives an untouched field.
+    let hk_toggle = effective_hotkey(cur.hotkey_toggle, read_hotkey(hwnd, IDC_HK_TOGGLE));
+    let hk_settings = effective_hotkey(cur.hotkey_settings, read_hotkey(hwnd, IDC_HK_SETTINGS));
 
     // Build a Config and resolve it (this applies all the clamping/defaults).
     let cfg = Config {
@@ -1107,6 +1109,20 @@ fn needs_ext(vk: u32, vsc_ex: u32) -> bool {
     matches!(vk, 0x21..=0x28 | 0x2D | 0x2E | 0x90) || (vsc_ex & 0xFF00) == 0xE000
 }
 
+/// The hotkey Apply saves for one action, from the `saved` combo and what its
+/// `field` reads. The control cannot show Win, so a field the user did not
+/// touch reads a saved Win combo without Win; the saved combo then stays.
+/// Otherwise (no Win, or a field the user changed or cleared) the field wins.
+fn effective_hotkey(saved: Option<HotkeySpec>, field: Option<HotkeySpec>) -> Option<HotkeySpec> {
+    if let (Some(s), Some(f)) = (saved, field) {
+        let untouched = f.vk == s.vk && f.mods == (s.mods & !MOD_WIN.0);
+        if s.mods & MOD_WIN.0 != 0 && untouched {
+            return saved;
+        }
+    }
+    field
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1181,6 +1197,21 @@ mod tests {
         ] {
             assert!(!needs_ext(vk, sc), "vk {vk:#04X}");
         }
+    }
+
+    #[test]
+    fn win_combo_survives_an_untouched_field() {
+        let t = |mods: u32| Some(HotkeySpec { mods, vk: 0x54 }); // T
+        let (win, shift, ctrl) = (MOD_WIN.0, MOD_SHIFT.0, MOD_CONTROL.0);
+        // The field cannot show Win, so an untouched field reads the saved
+        // combo minus Win: the saved combo stays.
+        assert_eq!(effective_hotkey(t(win), t(0)), t(win));
+        assert_eq!(effective_hotkey(t(win | shift), t(shift)), t(win | shift));
+        // A field the user changed or cleared wins.
+        assert_eq!(effective_hotkey(t(win), t(ctrl)), t(ctrl));
+        assert_eq!(effective_hotkey(t(win), None), None);
+        // Without Win in the saved combo the field always wins.
+        assert_eq!(effective_hotkey(t(ctrl), t(0)), t(0));
     }
 
     #[test]
