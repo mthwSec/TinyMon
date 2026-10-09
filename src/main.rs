@@ -63,10 +63,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LWA_ALPHA, MB_ICONWARNING, MB_OK, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG,
     MSGFLT_ALLOW, SM_CXSMICON, SPI_SETWORKAREA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE,
-    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
-    WM_EXITSIZEMOVE, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_NCHITTEST, WM_NCRBUTTONUP, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
-    WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENTERSIZEMOVE,
+    WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_NCHITTEST, WM_NCRBUTTONUP, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE,
+    WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    WS_POPUP,
 };
 
 use windows::Win32::UI::Input::KeyboardAndMouse::GetFocus;
@@ -101,8 +102,6 @@ pub(crate) const WM_APP_SETTINGS_CLOSED: u32 = WM_APP + 3;
 pub(crate) const WM_APP_HOTKEY_STATUS: u32 = WM_APP + 5;
 
 // ---- Tray + menu -----------------------------------------------------------
-/// Window moved to a monitor with different DPI scaling.
-const WM_DPICHANGED: u32 = 0x02E0;
 const TRAY_UID: u32 = 1;
 /// The timer that retries a failed tray add (add_tray_icon) every
 /// TRAY_RETRY_MS, at most TRAY_MAX_TRIES times; TIMER_ID is the sampling one.
@@ -813,8 +812,7 @@ unsafe extern "system" fn wnd_proc(
             if !p.is_null() {
                 let in_move = {
                     let st = &mut *p;
-                    let new_dpi = (wparam.0 & 0xFFFF) as u32;
-                    st.dpi = if new_dpi == 0 { 96 } else { new_dpi };
+                    st.dpi = dpi::dpi_from_wparam(wparam);
                     let nf = create_mono_font(Scale(st.dpi), st.settings.font_px);
                     let _ = DeleteObject(HGDIOBJ(st.font.0));
                     st.font = nf;

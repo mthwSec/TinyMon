@@ -61,7 +61,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::config::Config;
 use crate::dark;
-use crate::dpi::{dpi_for_window, Scale};
+use crate::dpi::{dpi_for_window, dpi_from_wparam, Scale};
 use crate::hotkeys::{blocks_typing, format_hotkey, HotkeySpec};
 use crate::placement::{fit_into, work_area_near};
 use crate::registry::{sample_rows, MetricKey};
@@ -376,15 +376,6 @@ fn window_size(s: Scale) -> (i32, i32) {
     let (fw, fh) = frame_size(s.0);
     let client_h = layout(MetricKey::ALL.len() as i32).client_h;
     (s.px(CLIENT_W_TOTAL) + fw, s.px(client_h) + fh)
-}
-
-/// The DPI a WM_DPICHANGED reports in `wparam`: the low word (the high word
-/// repeats it), with 0 read as 96.
-fn dpi_from_wparam(wparam: WPARAM) -> u32 {
-    match (wparam.0 & 0xFFFF) as u32 {
-        0 => 96,
-        dpi => dpi,
-    }
 }
 
 /// Register the settings window class + init common controls (once at startup).
@@ -1980,11 +1971,8 @@ mod tests {
     }
 
     #[test]
-    fn dpi_change_reads_the_new_dpi_and_scales_the_places() {
-        // WM_DPICHANGED's wParam holds the new DPI in both words; the low word
-        // counts, and 0, which would shrink every control to nothing, is 96.
-        assert_eq!(dpi_from_wparam(WPARAM(0x0078_0078)), 120);
-        assert_eq!(dpi_from_wparam(WPARAM(0)), 96);
+    fn dpi_change_scales_the_places() {
+        // The new DPI itself comes from dpi::dpi_from_wparam, tested there.
         // place_controls moves each control to its Place at the new scale: at
         // 96 dpi the Place itself, and at 120 dpi OK (all 10 metrics) lands
         // where spec 8.5's manual check expects it, client (130, 670), 65 x 33.

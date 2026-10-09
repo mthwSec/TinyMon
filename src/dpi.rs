@@ -7,7 +7,7 @@
 //! device pixels through [`Scale`], so a "13px" font is the same physical size
 //! on every display.
 
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, WPARAM};
 use windows::Win32::UI::HiDpi::{
     GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -48,6 +48,16 @@ pub fn system_dpi() -> u32 {
     }
 }
 
+/// The DPI a WM_DPICHANGED reports in `wparam`: the low word (the high word
+/// repeats it), with 0 read as 96. The widget's and the settings window's
+/// WM_DPICHANGED arms both read it here.
+pub fn dpi_from_wparam(wparam: WPARAM) -> u32 {
+    match (wparam.0 & 0xFFFF) as u32 {
+        0 => 96,
+        dpi => dpi,
+    }
+}
+
 /// A DPI scale factor (the raw dots-per-inch, 96 == 100%).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Scale(pub u32);
@@ -62,7 +72,17 @@ impl Scale {
 
 #[cfg(test)]
 mod tests {
-    use super::Scale;
+    use super::{dpi_from_wparam, Scale};
+    use windows::Win32::Foundation::WPARAM;
+
+    #[test]
+    fn dpi_change_reads_the_new_dpi() {
+        // WM_DPICHANGED's wParam holds the new DPI in both words; the low word
+        // counts, and 0, which would shrink the widget and every settings
+        // control to nothing, is 96.
+        assert_eq!(dpi_from_wparam(WPARAM(0x0078_0078)), 120);
+        assert_eq!(dpi_from_wparam(WPARAM(0)), 96);
+    }
 
     #[test]
     fn identity_at_96() {
