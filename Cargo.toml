@@ -16,18 +16,11 @@ panic = "abort"     # drop unwinding machinery -> smaller binary
 strip = true        # strip symbols from the final executable
 
 # Optional features.
-#   temp — CPU/GPU temperatures. The metric always offers a native CPU/system
-#          temp via the ACPI thermal-zone PDH counter; this feature adds the
-#          LibreHardwareMonitor WMI reader for accurate, named CPU + GPU sensors.
-#          On by default; opt out (smaller, no COM/WMI) with --no-default-features.
+#   temp - the Temperature metric (ACPI thermal zones via PDH, else n/a).
+#          On by default; --no-default-features removes the metric.
 [features]
 default = ["temp"]
-temp = [
-    "windows/Win32_System_Com",
-    "windows/Win32_System_Ole",
-    "windows/Win32_System_Variant",
-    "windows/Win32_System_Wmi",
-]
+temp = []
 
 [build-dependencies]
 # Build-time only (not in the runtime binary): embeds the app icon + Windows
