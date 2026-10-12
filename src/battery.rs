@@ -66,17 +66,10 @@ pub fn battery_value(info: &BatteryInfo) -> String {
 /// Battery row: a charge-level bar (green when full → red when low), or a
 /// value-only "n/a" row when no battery is present.
 pub fn battery_row(info: &BatteryInfo) -> Row {
-    let value = battery_value(info);
     if !info.present {
-        return Row {
-            label: "Bat".into(),
-            value,
-            bar: None,
-            color: None,
-            bar_color: None,
-            alert: false,
-        };
+        return Row::na("Bat");
     }
+    let value = battery_value(info);
     let frac = (info.percent as f32 / 100.0).clamp(0.0, 1.0);
     // Color by charge remaining: 100% -> green, 0% -> red (load_color inverted).
     // A high charge is good news, so the row never raises the red label alert.
@@ -102,6 +95,13 @@ mod tests {
     #[test]
     fn no_battery_is_na() {
         assert_eq!(battery_value(&info(false, true, false, 0, None)), "n/a");
+    }
+
+    #[test]
+    fn no_battery_row_is_value_only() {
+        let r = battery_row(&info(false, true, false, 0, None));
+        assert_eq!((r.label.as_str(), r.value.as_str()), ("Bat", "n/a"));
+        assert_eq!((r.bar, r.color, r.bar_color, r.alert), (None, None, None, false));
     }
 
     #[test]

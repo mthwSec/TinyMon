@@ -16,7 +16,7 @@ panic = "abort"     # drop unwinding machinery -> smaller binary
 strip = true        # strip symbols from the final executable
 
 # Optional features.
-#   temp - the Temperature metric (ACPI thermal zones via PDH, else n/a).
+#   temp - the Temperature metric (live ACPI thermal zones via PDH, else n/a).
 #          On by default; --no-default-features removes the metric.
 [features]
 default = ["temp"]

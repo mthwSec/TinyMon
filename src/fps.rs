@@ -22,10 +22,11 @@
 //! # Decision
 //!
 //! Not built. If pursued later, the recommended path is **PresentMon/ETW behind
-//! a `fps` Cargo feature** (mirroring the optional `temp` feature) — documented
-//! to require elevation, and **never** injection. The no-admin
-//! `DwmGetCompositionTimingInfo` path is only worthwhile if labelled plainly as
-//! a *compositor* rate (e.g. `DWM 144`), which is a different metric than FPS.
+//! a `fps` Cargo feature** (feature-gated like the `temp` metric, which is on
+//! by default), documented to require elevation, and **never** injection. The
+//! no-admin `DwmGetCompositionTimingInfo` path is only worthwhile if labelled
+//! plainly as a *compositor* rate (e.g. `DWM 144`), which is a different metric
+//! than FPS.
 //!
 //! # How it would plug in (integration sketch)
 //!

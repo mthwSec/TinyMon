@@ -387,7 +387,7 @@ pub fn sample_rows(order: &[MetricKey]) -> Vec<Row> {
                 secs_left: Some(7800),
             })),
             #[cfg(feature = "temp")]
-            MetricKey::Temp => out.push(crate::temp::temp_row("CPU Temp", 55.0)),
+            MetricKey::Temp => out.push(crate::temp::temp_row("Temp", 55.0)),
         }
         let accent = key.accent();
         for row in &mut out[start..] {
@@ -456,6 +456,15 @@ mod tests {
         assert_eq!(rows.len(), 6); // cpu(1) + ram(1) + per-core(4)
         assert_eq!(rows[0].label, "CPU");
         assert!(rows.iter().all(|r| r.color.is_some())); // accent stamped on each
+    }
+
+    #[cfg(feature = "temp")]
+    #[test]
+    fn preview_temp_row_claims_no_cpu_sensor() {
+        // No source labels a reading "CPU Temp" any more, so neither does
+        // the preview.
+        let rows = sample_rows(&[MetricKey::Temp]);
+        assert_eq!((rows[0].label.as_str(), rows[0].value.as_str()), ("Temp", "55\u{00B0}C"));
     }
 
     #[test]
