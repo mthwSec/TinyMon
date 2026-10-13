@@ -953,3 +953,92 @@ Config and build:
 | BOM-less UTF-16 config files | C4.1 option | Not planned | Rare; would need NUL-byte skipping |
 | Reusable per-tick row and string buffers | docs-spec[25] | Not planned | Negligible cost |
 | LICENSE files; repository URL check | docs-spec[27], docs-spec[28] | SP4 | Release work |
+
+## 12. Amendments made during implementation
+
+Sections 1-11 above stay as the owner approved them. This section records where the implementation departs from them: the owner's decisions taken during the work, the decisions made while the work was planned, the hardening and review-fix commits, and every place where the text above no longer matches the code. Where the two disagree, this section and the code win. All dates are 2026.
+
+### 12.1 Owner decisions
+
+| Date | Decision | What it changes |
+|---|---|---|
+| 10-07 | C1.5's `MetricKey::is_rate()` is named `is_delta()` ("the value is the delta between two samples"), so that it cannot be confused with `Row::rate`; the semantics are unchanged | 5.2, C1.5 and its tests read `is_delta` (`delta_metrics_are_flagged`, `collect_rows_masks_only_delta_metrics_while_pending`); landed with step 14 (b293514) |
+| 10-08 | A hardening task before step 12: tests that pin behaviour Phase A's code relied on but no test fixed, and three small code changes | Five commits, 6e37ecb to 1954e99 (12.3); C1.1's UMA rule changes (12.4) |
+| 10-08 | A test-only follow-up to step 14 makes the pending-mask test independent of the per-core priming sample, which made it fail now and then | c5a0401 and its review fix a94eaaa (12.3) |
+| 10-08 | The widget's home must not move from one launch to the next: the first tick after startup puts the widget at home instead of resizing it from a corner. With it, the other fixes of the Phase B review: the marker stays short across an interval-only Apply, a partial per-core sample keeps the known cores as n/a, and two borrow sites are scoped | e0bd7ae, 3aeba5c, 6a8fbc2 and 315b6a7 (12.3); 5.4, 5.7, 5.8, C1.4, C1.5, C2.1a and C2.1b change (12.4) |
+| 10-09 | Step 28 (C3.6a-2, the settings window's WM_DPICHANGED relayout), which Section 10 names as the first commit to drop, is kept | 64c7160; its check stays manual (8.5) |
+| 10-09 | In Phase C, a task whose tree matches the plan's verified reference tree does not repeat its debug-copy runtime check (8.3): the reference run stands for it. A commit whose tree differs runs its checks | The runtime evidence of steps 22-31 is the plan's reference runs |
+| 10-09 | The legacy LibreHardwareMonitor (LHM) WMI reader is removed instead of hardened, as the first Phase D commit, before step 33. LHM 0.9.5 and later publish no WMI namespace, and the owner does not run LHM. The Temperature metric keeps the PDH ACPI thermal-zone reader (and later, in SP3, a D3DKMT discrete-GPU source). The `temp` feature stays on by default but no longer enables `Win32_System_Com`, `Win32_System_Ole`, `Win32_System_Variant` or `Win32_System_Wmi` (measured: -3,072 B) | Replaces C4.4 and step 35; C4.2 loses its LHM parts (12.4) |
+| 10-09 | The live session (8.4, decision D3) happens at the very end of SP1, and only when the owner says go. The C2.6 and C2.7 runtime checks wait for it. It adds one optional manual step: the owner types a real `Ctrl+Alt+<key>` combo into a Settings hotkey field and sees it captured | 8.4 items 5, 6 and 10 |
+
+### 12.2 Decisions made while Phase D was planned (10-09)
+
+- Step 33 (C4.2) is one commit without the prep commit: Phase D's first commit adds the test `zone_rows_keep_their_labels`, which pins the old zone rows in the place of `build_rows_characterizes_todays_fallback`, and without the LHM reader there is no `pick_lhm`. `build_rows(zones, out)` takes only the zones (SP3's GPU source plugs in there), and `lhm_rows_take_precedence_over_zones` is dropped. Added tests: `zone_labels_name_the_acpi_zone`, `registry::tests::preview_temp_row_claims_no_cpu_sensor` and `battery::tests::no_battery_row_is_value_only`. The `Cargo.toml` comment reads: "temp - the Temperature metric (live ACPI thermal zones via PDH, else n/a). On by default; --no-default-features removes the metric."
+- Follow-up items folded into Phase D: the battery's no-battery row is `Row::na("Bat")` (with step 33); `WM_DESTROY` clears `GWLP_USERDATA` before it reclaims the `AppState` box, so no site keeps an AppState handle across a call the borrow rule names, and an `apply_settings` comment says that a first tick still due "stays capped" (both with step 36).
+- Step 36 (C2.6): `wm_app_ids_are_distinct` also pins `WM_APP_SURFACE == WM_APP + 4`, the value another build may post; `surface` starts the tray retry when its add fails, as `WM_CREATE` does.
+- Step 37 (C2.7): `launches` ignores the case of ASCII letters only (a byte loop with `u8::eq_ignore_ascii_case`, about 0.4 KiB smaller than `str::eq_ignore_ascii_case`); a non-ASCII letter in another case reads as off, which a click repairs. An opening quote without a closing one takes the rest of the value as the path. The registry is written with `RegSetKeyValueW` and `RegDeleteKeyValueW` and read with `RegGetValueW`.
+- The runtime checks of C2.6 and C2.7 run only in the live session: a debug build skips the single-instance guard, a release copy is never launched outside the live session (and one could find the owner's widget), and the C2.7 check writes the real Run and StartupApproved values.
+- The C2.1b check that Section 7 asks to repeat after step 33 is not repeated: the development machine's only thermal zone is a constant stub, so the temperature rows never change at runtime there.
+- Step 38 is three commits: the code comments, the README, and this section.
+
+### 12.3 Hardening and review-fix commits
+
+| Date | Commit | Subject | Spec text it changes |
+|---|---|---|---|
+| 10-08 | 6e37ecb | test: pin config and hotkey edge cases the suite left open | none (tests only) |
+| 10-08 | 7184172 | test: pin sampler and row edge cases the suite left open | none (tests only) |
+| 10-08 | 5c46ca2 | gpu: show n/a for integrated GPU memory when shared usage is unknown | C1.1 |
+| 10-08 | 00d5df6 | gpu: drop short_name's second whitespace squash | C1.3 |
+| 10-08 | 1954e99 | render: expect too_many_arguments on render_rows and draw_row | 6.0, 0d |
+| 10-08 | c5a0401 | test: make the pending-mask test independent of per-core priming | C1.5 (tests) |
+| 10-08 | a94eaaa | test: cover a two-row delta metric in the pending-mask test | C1.5 (tests) |
+| 10-08 | e0bd7ae | main: put the widget at home on the first tick after startup | 5.7, 5.8, C2.1b |
+| 10-08 | 3aeba5c | main: keep the pending marker short across an interval-only Apply | 5.4, C1.5 |
+| 10-08 | 6a8fbc2 | percpu: keep known cores as n/a when a sample lacks some of them | C1.4, C2.1a |
+| 10-08 | 315b6a7 | main: scope the AppState borrows in toggle_lock and open_settings | none (5.4 applied to the letter) |
+| 10-09 | 2f1b35d | settings_win: create each hotkey note before its label | C3.8 |
+| 10-09 | 2de6d66 | settings_win: scale control edges, not sizes | C3.6a, C3.6b (tests) |
+| 10-09 | fc97306 | settings_win: end overflowing hotkey labels in an ellipsis | C3.8 |
+| 10-09 | b285053 | settings_win: pin the hotkey note code mapping | none (tests only) |
+| 10-09 | fdfaaf6 | dpi: decode WM_DPICHANGED's DPI in one place | 5.1 |
+
+Phase D, planned on 10-09, adds eight commits after fdfaaf6, in this order: "temp: remove the LibreHardwareMonitor WMI reader" (the owner's amendment, in the place of step 35), "temp: show an ACPI thermal zone only once its reading moves" (step 33), "registry: leave Temperature out of the default metrics" (step 34), "main: let a second launch surface the running widget and exit" (step 36), "startup: match the Run value to this exe and write it quoted" (step 37), and step 38's "docs: bring stale code comments up to date", "docs: rewrite the README for the finished correctness pass" and "docs: record the amendments made during implementation" (this section).
+
+### 12.4 Where the text above no longer matches the code
+
+- Section 2 and 8.2: SP1 ends with 225 tests and 2 ignored diagnostics (213 and 2 without default features), not about 190 and 176; the release exe ends at 258,048 B (255,488 B without default features), +17,408 B (17.0 KiB) over the baseline, below the "about 259,500 B" of Section 2 and 5,120 B below the 263,168 B stop.
+- Section 3, the temperature decision: the LHM WMI reader is removed, not kept and hardened (12.1); the rest of the decision stands.
+- Section 4: the UI thread makes no WMI call any more, so the "bounded (the LHM WMI reader; a hung winmgmt ...)" exception is void.
+- 5.1: `src/temp.rs` has zone liveness, honest labels and `build_rows`, and no LHM reader; `src/dpi.rs` also has `dpi_from_wparam`, the one WM_DPICHANGED decode for the widget and the settings window (fdfaaf6); `src/battery.rs` builds its no-battery row with `Row::na("Bat")`; `Cargo.toml`'s `temp` feature enables no windows feature.
+- 5.2 and C1.5: `MetricKey::is_delta` for `is_rate` (12.1).
+- 5.4, step 1: an interval change re-arms TIMER_ID with `timer_period(interval, first_tick_pending)`, which is `first_tick_ms(interval)` while the first tick after a build of the sources is still due and the interval otherwise (3aeba5c).
+- 5.7: the first TIMER_ID tick after startup catches a changed row count up with `place_widget` (the widget goes home, home is kept), and only later ticks call `sync_layout` (`tick_layout`, e0bd7ae).
+- 5.8: AppState also has `startup_layout_pending` (e0bd7ae).
+- 5.9: no WBEM status codes are used; the `temp` feature enables no windows feature.
+- 6.0, 0d: `render_rows` and `draw_row` carry `#[expect(clippy::too_many_arguments)]` instead of `#[allow]` (1954e99), and after 0d the suite reported 0.00 s rather than about 0.2 s.
+- C1.1: for an integrated (UMA) adapter `vram_used` is None when the shared usage is unknown; an unknown dedicated part still counts as 0, and discrete adapters are unchanged (5c46ca2). So `vram_used(true, Some(x), None)` is None, where the text above says "None only when both are None".
+- C1.3: "Every existing output is unchanged" holds except for names with unusual whitespace, which now normalise; `short_name` normalises whitespace once (00d5df6).
+- C1.4 and C2.1a's risks: once cores are known, a per-core sample yields the union of the known indices and the returned ones, so a core missing from one sample shows "C{i} n/a" and its sparkline pauses, instead of the list being replaced and the series restarting (6a8fbc2).
+- C1.5's tests: `collect_rows_masks_only_delta_metrics_while_pending` builds its sources by hand (CPU, RAM, and a per-core and a disk sampler that have not sampled) instead of a primed `build_sources([PerCpu, Ram])` (c5a0401, a94eaaa). The marker also stays at most a second across an interval-only Apply (3aeba5c).
+- C2.1b: see 5.7: the first tick after startup places the widget at home; rows that arrive on a later tick still resize it from a corner with home following.
+- C2.4's risks: a failing try can block the UI thread for up to two Shell_NotifyIconW timeouts, NIM_ADD and then NIM_MODIFY.
+- C2.6: as designed, with the additions of 12.2.
+- C2.7: as designed, with the choices of 12.2.
+- C3.6a: `Place::scaled` scales a control's edges and takes its size between them, so controls that touch in logical units also touch in device pixels (2de6d66); the test list gains `scaled_controls_do_not_overlap_at_any_dpi`.
+- C3.6b: its test `preview_pane_fits_the_widest_widget_at_any_dpi` reads the pane's device width from `Place::scaled`, not `Scale(dpi).px(w) - 2` (2de6d66). Its risks say that layouts of 12 or more rows at large fonts are scaled; at 96 dpi the preview is scaled from 13 rows at fonts 15-16, 14 at fonts 13-14, 15 at fonts 11-12 and 16 at fonts 9-10.
+- C3.8: the two hotkey labels are created with SS_ENDELLIPSIS (fc97306), and each note is created before its label, so a screen reader names each hotkey field after its label (2f1b35d).
+- C4.2: without the LHM parts (12.2): no prep commit, no `pick_lhm`, `build_rows(zones, out)`, no `lhm_rows_take_precedence_over_zones`, and the `Cargo.toml` comment of 12.2.
+- C4.4 and Section 7, step 35: replaced by the removal of the reader, done after step 32 and before step 33 (12.1). Section 7's totals change with it: about -3.0 KiB instead of +1.0 KiB.
+- 8.3, the C3.8 row: Win+F24 cannot be registered on the development machine (RegisterHotKey fails with 1409), so a check that needs a free Win combo uses Win+Shift+F24.
+- 8.4: as written, with the optional step of 12.1 in item 10. The Phase D plan gives the session's commands.
+- 8.5: the LibreHardwareMonitor item is void. Since 2de6d66, controls that touch in logical units also touch at 125%, 175% and 225%, which no check at 96 dpi can show; the manual DPI check is where to look at the hotkey labels and notes and the opacity readout against the controls below them.
+- Section 9: the LHM bullet is void: TinyMon reads no LHM sensors.
+- Section 10: the "LHM name whitelist" in the heuristics row is void.
+- Section 11: the rows "First LHM connect on the UI thread during the startup priming sample" and "Numbered GPU 1 Temp / GPU 2 Temp labels for LHM" are void; "LHM web-server reader" stays not planned, now because TinyMon reads LHM in no way.
+
+### 12.5 The branch when the code work ends
+
+- Commits after this document's own commit (a5c4f69): 19 on 10-07 (steps 0 to 11), 21 on 10-08 (the hardening task's five, steps 12 to 14, the two step-14 follow-ups, steps 15 to 21 and the four review fixes), 17 on 10-09 (steps 22 to 32, step 23 as two commits, the review fix 2f1b35d and the four fixes 2de6d66 to fdfaaf6), and Phase D's eight: 65 in all, none with a co-author trailer.
+- Tests: 225 passed and 2 ignored (213 and 2 with `--no-default-features`).
+- Release exe: 258,048 B (255,488 B with `--no-default-features`).
+- Still to come: the live session (8.4). The branch `sp1-correctness` stays local, neither merged into `main` nor pushed; merging is the owner's decision.
