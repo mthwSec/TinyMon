@@ -40,13 +40,17 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use std::path::PathBuf;
 
 use windows::core::{w, Error, Result, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    CloseHandle, GetLastError, COLORREF, ERROR_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM, LRESULT,
+    POINT, RECT, WIN32_ERROR, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontIndirectW,
     CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, InvalidateRect, SelectObject, UpdateWindow,
     CLEARTYPE_QUALITY, HBITMAP, HDC, HFONT, HGDIOBJ, LOGFONTW, PAINTSTRUCT, SRCCOPY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
@@ -96,6 +100,10 @@ const WM_APP_APPLY: u32 = WM_APP + 2;
 /// Posted by the settings window when it closes; clears the single-instance
 /// slot once that window is gone.
 pub(crate) const WM_APP_SETTINGS_CLOSED: u32 = WM_APP + 3;
+/// Posted by a second launch of TinyMon to the running widget, which comes
+/// back (claim_single_instance, surface). It goes from one process to
+/// another, which can be another build, so its value never changes.
+const WM_APP_SURFACE: u32 = WM_APP + 4;
 /// Posted by `apply_settings` to the open settings window after an Apply,
 /// which may have registered the hotkeys again: the notes beside its hotkey
 /// fields show which failed (`hotkey_status`).
@@ -364,6 +372,11 @@ fn main() -> Result<()> {
     // SAFETY: the whole window lifecycle is Win32 FFI. Every call is annotated
     // inline; all handles are produced by the OS and used only while valid.
     unsafe {
+        // One TinyMon per session: a second launch brings the running widget
+        // back and ends here, before it reads or writes any file.
+        if !claim_single_instance() {
+            return Ok(());
+        }
         // Before the window exists: WM_CREATE lets this message through UIPI,
         // and wnd_proc adds the tray icon again when it arrives.
         TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Ordering::Relaxed);
@@ -689,6 +702,14 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
 
+        // TinyMon was started again (claim_single_instance in the new
+        // process): come back, shown and at home (surface). The message
+        // carries nothing, so a foreign post can only show the widget.
+        WM_APP_SURFACE => {
+            surface(hwnd);
+            LRESULT(0)
+        }
+
         // Global hotkeys: dispatch to the same actions as the menu. A combo
         // TinyMon owns never reaches a hotkey field of the settings window
         // (RegisterHotKey takes it first), so while such a field has the focus
@@ -840,11 +861,14 @@ unsafe extern "system" fn wnd_proc(
                     let _ = DestroyWindow(sh);
                 }
                 persist(&*p);
+                // Detach the state before reclaiming it, so that no AppState
+                // handle is live across SetWindowLongPtrW (the borrow rule)
+                // and wnd_proc finds no state from here on.
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 let mut st = Box::from_raw(p); // reclaim; sources drop (PDH queries close)
                 destroy_back_buffer(&mut st);
                 let _ = DeleteObject(HGDIOBJ(st.font.0));
                 let _ = DestroyIcon(st.icon_sm);
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             }
             PostQuitMessage(0);
             LRESULT(0)
@@ -876,6 +900,63 @@ unsafe extern "system" fn wnd_proc(
 /// Fetch the per-window `AppState` pointer (null before WM_CREATE stored it).
 unsafe fn state_ptr(hwnd: HWND) -> *mut AppState {
     GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppState
+}
+
+// ---- Single instance -------------------------------------------------------
+
+/// Whether this launch keeps running, given its CreateMutexW call for the
+/// instance mutex: `created_ok` says whether the call returned a handle, and
+/// `last_error` is GetLastError right after it. A handle that comes with
+/// ERROR_ALREADY_EXISTS means another TinyMon of this session holds the
+/// mutex: this launch exits. Without a handle (ERROR_ACCESS_DENIED next to an
+/// elevated instance, say) it runs, and a debug build always runs, so that
+/// `cargo run` and debug test copies work next to an installed release.
+fn instance_action(created_ok: bool, last_error: WIN32_ERROR, debug: bool) -> bool {
+    let other_instance = created_ok && last_error == ERROR_ALREADY_EXISTS;
+    debug || !other_instance
+}
+
+/// One TinyMon per session: create or open the named mutex
+/// `Local\TinyMon.Instance`, whose handle stays open until the process exits,
+/// and return whether this launch keeps running (instance_action). When
+/// another instance holds the mutex, its widget, hidden or not (FindWindowW
+/// finds hidden windows too), is asked to come back (WM_APP_SURFACE), and
+/// this launch closes its handle and exits. main() calls it first, before any
+/// file is read or written.
+unsafe fn claim_single_instance() -> bool {
+    let mutex = CreateMutexW(None, false, w!("Local\\TinyMon.Instance"));
+    // On success the wrapper leaves the last error alone, so a mutex that was
+    // there already still reads ERROR_ALREADY_EXISTS.
+    let last_error = GetLastError();
+    if instance_action(mutex.is_ok(), last_error, cfg!(debug_assertions)) {
+        return true;
+    }
+    if let Ok(running) = FindWindowW(CLASS_NAME, PCWSTR::null()) {
+        let _ = PostMessageW(Some(running), WM_APP_SURFACE, WPARAM(0), LPARAM(0));
+    }
+    if let Ok(handle) = mutex {
+        let _ = CloseHandle(handle);
+    }
+    false
+}
+
+/// Bring the widget back for a second launch (WM_APP_SURFACE): shown without
+/// taking the focus (show_no_activate), at home or as close to it as the
+/// screen allows (place_widget), with its tray icon, added again if it is
+/// gone (add_tray_icon; a failed add starts the retry). Those calls send
+/// messages to the widget, so the flag is set before them, with no AppState
+/// reference live across them.
+unsafe fn surface(hwnd: HWND) {
+    let p = state_ptr(hwnd);
+    if p.is_null() {
+        return;
+    }
+    (*p).visible = true;
+    place_widget(hwnd);
+    show_no_activate(hwnd);
+    if !add_tray_icon(hwnd) {
+        start_tray_retry(hwnd);
+    }
 }
 
 // ---- Tray icon -------------------------------------------------------------
@@ -1222,7 +1303,7 @@ unsafe fn apply_settings(hwnd: HWND, new: Settings) -> Option<String> {
             let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), st.settings.opacity, LWA_ALPHA);
         }
         if st.settings.interval_ms != old.interval_ms {
-            // A first tick still due keeps its capped period (timer_period).
+            // A first tick still due stays capped (timer_period).
             let period = timer_period(st.settings.interval_ms, st.first_tick_pending);
             let _ = KillTimer(Some(hwnd), TIMER_ID);
             SetTimer(Some(hwnd), TIMER_ID, period, None);
@@ -1383,6 +1464,7 @@ pub(crate) unsafe fn create_mono_font(scale: Scale, px: i32) -> HFONT {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SUCCESS};
     use windows::Win32::UI::WindowsAndMessaging::{
         PeekMessageW, HWND_MESSAGE, PM_REMOVE, WINDOW_EX_STYLE, WINDOW_STYLE,
     };
@@ -1558,12 +1640,28 @@ mod tests {
 
     #[test]
     fn wm_app_ids_are_distinct() {
-        let ids = [WM_TRAY, WM_APP_APPLY, WM_APP_SETTINGS_CLOSED, WM_APP_HOTKEY_STATUS];
+        let ids =
+            [WM_TRAY, WM_APP_APPLY, WM_APP_SETTINGS_CLOSED, WM_APP_SURFACE, WM_APP_HOTKEY_STATUS];
         for (i, id) in ids.iter().enumerate() {
             // In the WM_APP range, below the registered messages (such as
             // TaskbarCreated), and each used once.
             assert!((WM_APP..0xC000).contains(id), "{id:#06X}");
             assert!(!ids[i + 1..].contains(id), "{id:#06X} twice");
         }
+        // A second launch posts WM_APP_SURFACE to the running TinyMon, which
+        // can be another build: its value never changes.
+        assert_eq!(WM_APP_SURFACE, WM_APP + 4);
+    }
+
+    #[test]
+    fn instance_action_exits_only_for_an_existing_instance() {
+        // The mutex was there already: another TinyMon runs, so this one exits.
+        assert!(!instance_action(true, ERROR_ALREADY_EXISTS, false));
+        // This launch created the mutex: it is the only TinyMon, and runs.
+        assert!(instance_action(true, ERROR_SUCCESS, false));
+        // A debug build runs next to a running TinyMon too.
+        assert!(instance_action(true, ERROR_ALREADY_EXISTS, true));
+        // No handle (the mutex of an elevated instance, say): it runs.
+        assert!(instance_action(false, ERROR_ACCESS_DENIED, false));
     }
 }
