@@ -110,7 +110,12 @@ asleep or set to another resolution, or the taskbar moved), the widget is
 placed inside the nearest work area and home is kept, so the widget goes back
 when home fits again. When the widget grows or shrinks (a new font, more or
 fewer rows), the edges nearest to the screen's edges stay put, so a widget in a
-corner grows away from it, and home moves along while the widget is at home.
+corner grows away from it. Home, the widget's top-left corner, moves along when
+the change is yours (a new font or other metrics) and the widget sits at home.
+When rows come or go while TinyMon runs (a thermal zone that proves itself,
+say), home stays where it was, so every launch starts from the same spot; a
+widget that grew this way goes back to home's top-left when the screen layout
+changes.
 
 **One TinyMon at a time.** Starting TinyMon again, from any copy, brings the
 running widget back (shown, at home, with its tray icon) and the new launch
@@ -367,7 +372,7 @@ cargo build --release --no-default-features  # without it
 
 The exe is `target\release\tinymon.exe`. Copy it anywhere and run it.
 
-Sizes with Rust 1.96: **258,048 bytes** (252 KiB) for the default build and
+Sizes with Rust 1.96: **258,560 bytes** (252.5 KiB) for the default build and
 255,488 bytes without default features. The release profile optimises for size
 (`opt-level = "z"`, LTO, one codegen unit, `panic = "abort"`, stripped).
 
@@ -378,8 +383,8 @@ invoking user (`asInvoker`), Windows 10 and 11, Per-Monitor-V2 DPI awareness.
 ## Tests
 
 ```sh
-cargo test                          # 225 tests, 2 diagnostics ignored
-cargo test --no-default-features    # 213 tests, 2 diagnostics ignored
+cargo test                          # 227 tests, 2 diagnostics ignored
+cargo test --no-default-features    # 215 tests, 2 diagnostics ignored
 cargo test -- --ignored --nocapture dump_   # print the detected GPUs and GPU engines
 ```
 

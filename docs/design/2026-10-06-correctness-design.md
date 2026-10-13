@@ -1001,18 +1001,19 @@ Sections 1-11 above stay as the owner approved them. This section records where 
 | 10-09 | fc97306 | settings_win: end overflowing hotkey labels in an ellipsis | C3.8 |
 | 10-09 | b285053 | settings_win: pin the hotkey note code mapping | none (tests only) |
 | 10-09 | fdfaaf6 | dpi: decode WM_DPICHANGED's DPI in one place | 5.1 |
+| 10-13 | 3ad8543 | main: let a tick's resize leave home alone | 5.7, C2.1b, C2.5 |
 
-Phase D, planned on 10-09, adds eight commits after fdfaaf6, in this order: "temp: remove the LibreHardwareMonitor WMI reader" (the owner's amendment, in the place of step 35), "temp: show an ACPI thermal zone only once its reading moves" (step 33), "registry: leave Temperature out of the default metrics" (step 34), "main: let a second launch surface the running widget and exit" (step 36), "startup: match the Run value to this exe and write it quoted" (step 37), and step 38's "docs: bring stale code comments up to date", "docs: rewrite the README for the finished correctness pass" and "docs: record the amendments made during implementation" (this section).
+Phase D, planned on 10-09, adds eight commits after fdfaaf6, in this order: "temp: remove the LibreHardwareMonitor WMI reader" (the owner's amendment, in the place of step 35), "temp: show an ACPI thermal zone only once its reading moves" (step 33), "registry: leave Temperature out of the default metrics" (step 34), "main: let a second launch surface the running widget and exit" (step 36), "startup: match the Run value to this exe and write it quoted" (step 37), and step 38's "docs: bring stale code comments up to date", "docs: rewrite the README for the finished correctness pass" and "docs: record the amendments made during implementation" (this section). Phase D's final review (10-13) added the review fix 3ad8543 and the docs commit after it, which brings the README and this section up to date.
 
 ### 12.4 Where the text above no longer matches the code
 
-- Section 2 and 8.2: SP1 ends with 225 tests and 2 ignored diagnostics (213 and 2 without default features), not about 190 and 176; the release exe ends at 258,048 B (255,488 B without default features), +17,408 B (17.0 KiB) over the baseline, below the "about 259,500 B" of Section 2 and 5,120 B below the 263,168 B stop.
+- Section 2 and 8.2: SP1 ends with 227 tests and 2 ignored diagnostics (215 and 2 without default features), not about 190 and 176; the release exe ends at 258,560 B (255,488 B without default features), +17,920 B (17.5 KiB) over the baseline, below the "about 259,500 B" of Section 2 and 4,608 B below the 263,168 B stop.
 - Section 3, the temperature decision: the LHM WMI reader is removed, not kept and hardened (12.1); the rest of the decision stands.
 - Section 4: the UI thread makes no WMI call any more, so the "bounded (the LHM WMI reader; a hung winmgmt ...)" exception is void.
 - 5.1: `src/temp.rs` has zone liveness, honest labels and `build_rows`, and no LHM reader; `src/dpi.rs` also has `dpi_from_wparam`, the one WM_DPICHANGED decode for the widget and the settings window (fdfaaf6); `src/battery.rs` builds its no-battery row with `Row::na("Bat")`; `Cargo.toml`'s `temp` feature enables no windows feature.
 - 5.2 and C1.5: `MetricKey::is_delta` for `is_rate` (12.1).
 - 5.4, step 1: an interval change re-arms TIMER_ID with `timer_period(interval, first_tick_pending)`, which is `first_tick_ms(interval)` while the first tick after a build of the sources is still due and the interval otherwise (3aeba5c).
-- 5.7: the first TIMER_ID tick after startup catches a changed row count up with `place_widget` (the widget goes home, home is kept), and only later ticks call `sync_layout` (`tick_layout`, e0bd7ae).
+- 5.7: the first TIMER_ID tick after startup catches a changed row count up with `place_widget` (the widget goes home, home is kept), and only later ticks call `sync_layout` (`tick_layout`, e0bd7ae), which never moves home for them (`TICKS_MOVE_HOME`, 3ad8543).
 - 5.8: AppState also has `startup_layout_pending` (e0bd7ae).
 - 5.9: no WBEM status codes are used; the `temp` feature enables no windows feature.
 - 6.0, 0d: `render_rows` and `draw_row` carry `#[expect(clippy::too_many_arguments)]` instead of `#[allow]` (1954e99), and after 0d the suite reported 0.00 s rather than about 0.2 s.
@@ -1020,8 +1021,9 @@ Phase D, planned on 10-09, adds eight commits after fdfaaf6, in this order: "tem
 - C1.3: "Every existing output is unchanged" holds except for names with unusual whitespace, which now normalise; `short_name` normalises whitespace once (00d5df6).
 - C1.4 and C2.1a's risks: once cores are known, a per-core sample yields the union of the known indices and the returned ones, so a core missing from one sample shows "C{i} n/a" and its sparkline pauses, instead of the list being replaced and the series restarting (6a8fbc2).
 - C1.5's tests: `collect_rows_masks_only_delta_metrics_while_pending` builds its sources by hand (CPU, RAM, and a per-core and a disk sampler that have not sampled) instead of a primed `build_sources([PerCpu, Ram])` (c5a0401, a94eaaa). The marker also stays at most a second across an interval-only Apply (3aeba5c).
-- C2.1b: see 5.7: the first tick after startup places the widget at home; rows that arrive on a later tick still resize it from a corner with home following.
+- C2.1b: see 5.7: the first tick after startup places the widget at home; rows that arrive on a later tick resize it from a corner and leave home alone, so a thermal zone that proves itself minutes after launch cannot move home at every launch (3ad8543). `sync_layout` takes `track_home`: WM_TIMER passes `TICKS_MOVE_HOME` (false), so its persist after a resize no longer fires, and `apply_settings` passes `force`, so an Apply that only catches up rows a tick found during a drag keeps home as well. The test list gains `an_apply_after_a_tick_resize_keeps_home`.
 - C2.4's risks: a failing try can block the UI thread for up to two Shell_NotifyIconW timeouts, NIM_ADD and then NIM_MODIFY.
+- C2.5: `placement::after_relayout` keeps a widget displaced while a resize without `track_home` (a tick's, or a WM_DPICHANGED relocation) leaves it away from home, so the next home-tracking resize (an Apply) does not adopt that spot either, and ends the displacement when a resize lands at home; "a system relocation never becomes home" now holds past the relocation itself. The test list gains `resize_without_track_home_away_from_home_displaces_the_widget` (3ad8543). Two consequences, both the same at every launch: `place_widget` (a display or work-area change, or a second launch's surface) puts a widget that grew on a tick back at home's top-left, so a lower-half widget moves down by the rows it gained, at most to the work area's edge; and a home set by a drag or Move to corner after such growth is the grown widget's top-left, so the next launch, which starts without those rows, shows its bottom edge higher by those rows, and a lower-half widget then grows upward from there when they come back.
 - C2.6: as designed, with the additions of 12.2.
 - C2.7: as designed, with the choices of 12.2.
 - C3.6a: `Place::scaled` scales a control's edges and takes its size between them, so controls that touch in logical units also touch in device pixels (2de6d66); the test list gains `scaled_controls_do_not_overlap_at_any_dpi`.
@@ -1038,7 +1040,7 @@ Phase D, planned on 10-09, adds eight commits after fdfaaf6, in this order: "tem
 
 ### 12.5 The branch when the code work ends
 
-- Commits after this document's own commit (a5c4f69): 19 on 10-07 (steps 0 to 11), 21 on 10-08 (the hardening task's five, steps 12 to 14, the two step-14 follow-ups, steps 15 to 21 and the four review fixes), 17 on 10-09 (steps 22 to 32, step 23 as two commits, the review fix 2f1b35d and the four fixes 2de6d66 to fdfaaf6), and Phase D's eight: 65 in all, none with a co-author trailer.
-- Tests: 225 passed and 2 ignored (213 and 2 with `--no-default-features`).
-- Release exe: 258,048 B (255,488 B with `--no-default-features`).
+- Commits after this document's own commit (a5c4f69): 19 on 10-07 (steps 0 to 11), 21 on 10-08 (the hardening task's five, steps 12 to 14, the two step-14 follow-ups, steps 15 to 21 and the four review fixes), 17 on 10-09 (steps 22 to 32, step 23 as two commits, the review fix 2f1b35d and the four fixes 2de6d66 to fdfaaf6), Phase D's eight, and on 10-13 the review fix 3ad8543 and the docs commit after it: 67 in all, none with a co-author trailer.
+- Tests: 227 passed and 2 ignored (215 and 2 with `--no-default-features`).
+- Release exe: 258,560 B (255,488 B with `--no-default-features`).
 - Still to come: the live session (8.4). The branch `sp1-correctness` stays local, neither merged into `main` nor pushed; merging is the owner's decision.
