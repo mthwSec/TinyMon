@@ -1,145 +1,293 @@
 # TinyMon
 
-A tiny, always-on-top Windows resource monitor written in **pure Rust + Win32** —
-no Electron, no webview, no runtime, no Python/C#. A single self-contained `.exe`
-(~195 KB) with a near-zero footprint. Pick exactly what it shows, restyle it, and
-drive it from global hotkeys — all from a native settings window.
+A tiny always-on-top Windows resource monitor, written in pure Rust and Win32:
+no Electron, no webview, no .NET, no scripting runtime. One small `.exe`
+(about 252 KiB) shows the metrics you pick in a borderless, semi-transparent
+widget, with a tray icon, two optional global hotkeys and a native settings
+window with a live preview.
 
+```text
++------------------------------+
+| TinyMon                   +2 |   dim title; "+N" when rows do not fit the screen
+|------------------------------|
+| CPU                      37% |   accent-coloured label, value on the right
+| ___..--''''--..___..--''---. |   sparkline of the recent samples
+| RAM              58% 9.3/16G |
+| ______..--------------''''-- |
+| Intel UHD 730            12% |   one row per GPU
+| __..___..__________..--__... |
++------------------------------+
 ```
-┌──────────────────────┐
-│ CPU              37%  │   label · value · load-colored bar
-│ ████████░░░░░░░░░░░░  │   (green → yellow → red by load)
-│ RAM       58% 9.3/16G │
-│ ████████████░░░░░░░░  │
-│ Intel UHD 730  2% 0/… │   one row per detected GPU
-│ █░░░░░░░░░░░░░░░░░░░░  │
-└──────────────────────┘
-```
 
-## Metrics (all individually toggleable)
+## Metrics
 
-| Metric | Shows | Source |
+Every metric can be switched on or off and put in any order in the settings
+window. A metric that is off is not sampled at all: its counters are never
+opened, so it costs nothing.
+
+| Metric (config token) | Rows it shows | Source |
 |---|---|---|
-| **CPU** | total usage % | `GetSystemTimes` deltas |
-| **RAM** | % used + used/total GB | `GlobalMemoryStatusEx` |
-| **GPU** | one row per adapter (discrete **or** integrated, **any vendor**): VRAM used/total + live utilization % | DXGI + vendor-neutral PDH "GPU Engine" counters |
-| **Per-core CPU** | one row per logical core | PDH `Processor(*)` |
-| **Disk** | total throughput + busy % | PDH `PhysicalDisk(_Total)` |
-| **Network** | total throughput | PDH `Network Interface(*)` (sums real NICs) |
-| **Uptime** | time since boot | `GetTickCount64` |
-| **Temperature** *(optional)* | CPU/GPU temps, one row per sensor | LibreHardwareMonitor via WMI — see [Temperature](#temperature-optional) |
+| CPU (`cpu`) | `CPU 37%`: total CPU load | `GetSystemTimes` deltas |
+| RAM (`ram`) | `RAM 58% 9.3/16G`: memory load, used/total GiB | `GlobalMemoryStatusEx` |
+| GPU (`gpu`) | one row per GPU, named after it (`Intel UHD 730 12%`): its busiest engine, summed across processes (Task Manager's GPU figure) | DXGI adapter list, PDH `\GPU Engine(*)\Utilization Percentage` |
+| VRAM (`vram`) | one row per GPU: `GPU Mem 0.8/8G` for an integrated GPU, `VRAM 2.0/16G` for a discrete one; with several GPUs the name follows the label (`VRAM RTX 3050`, `GPU Mem UHD 620`) | PDH `\GPU Adapter Memory(*)\Dedicated Usage` and `Shared Usage`; totals from DXGI |
+| Per-core CPU (`percpu`) | one row per logical core: `C0`, `C1`, ... | PDH `\Processor(*)\% Processor Time` |
+| Disk (`disk`) | `Disk R` and `Disk W`: read and write bytes per second (bar against 100 MiB/s) | PDH `\PhysicalDisk(_Total)\Disk Read Bytes/sec`, `Disk Write Bytes/sec` |
+| Network (`net`) | `Net↑` and `Net↓`: bytes per second sent and received (bar against 12.5 MB/s, about 100 Mbit/s) | `GetIfTable2` octet counters of the hardware network adapters |
+| Uptime (`uptime`) | `Up 3d 04:12` (or `04:12:33` under a day), no bar | `GetTickCount64` |
+| Battery (`battery`) | `Bat 85% 2:30` (time left), `Bat 72% chg` (charging) or `Bat 100% AC`; the bar shows the charge, green when full, red when low | `GetSystemPowerStatus` |
+| Temperature (`temp`) | `ACPI Temp 45°C`, or `ACPI THRM 45°C` and the like with several zones; `Temp n/a` when no zone qualifies (see [Temperature](#temperature)) | PDH `\Thermal Zone Information(*)\Temperature` |
 
-Only **CPU, RAM, GPU** are on by default; the rest are opt-in from the settings
-window. **Disabling a metric truly disables it** — a hidden metric is never
-sampled and opens no performance-counter query, so it costs nothing.
+On by default: **CPU, RAM and GPU**, which is also what **Reset** in Settings
+picks. The rest, Temperature included, are opt-in.
 
-## Features
+A reading that cannot be taken shows `n/a` with no bar instead of a misleading
+0: for example GPU memory before Windows 10 1709, a disk or network counter
+that fails, a desktop without a battery, or a machine without a hardware GPU
+(`GPU n/a`, `VRAM n/a`).
 
-- **Configurable** — a native settings window to choose **what's shown**, restyle
-  it (opacity, update interval, font size), bind **global hotkeys**, and a **live
-  preview** that mirrors the widget as you change things (plus **Reset to defaults**)
-- **Readable at a glance** — per-metric **accent-colored labels**, a compact
-  header, aligned value columns, and load-colored bars (green → red)
-- **DPI-aware** (Per-Monitor-V2) — crisp and correctly sized on 4K / scaled
-  displays, and rescales when dragged between monitors
-- **Always-on-top, borderless, draggable** layered window — semi-transparent,
-  no taskbar button, drag from anywhere
-- **System tray icon** (a runtime-drawn TinyMon glyph) with a right-click menu
-  (mirrored on the window itself): Show/Hide · **Settings…** · **Start with Windows** · Exit
-- **Global hotkeys** (optional) — toggle visibility / open settings from anywhere
-- **Portable** — remembers everything in a config file that travels with the
-  `.exe`; runs from a USB stick with no install
-- **Tiny** — size-optimized, double-buffered (flicker-free), minimal per-frame
-  allocations; a single self-contained ~205 KB `.exe`
+## The widget
 
-## Requirements (build)
+- **Rows.** Each row has the metric's accent-coloured label on the left (cut
+  with an ellipsis when too long) and its value on the right, in one value
+  column for all rows. Below it a bar shows the level, green to yellow to red.
+  The widget updates every second by default (250 ms to 10 s, in Settings).
+- **Sparklines.** Once a row has two samples, its bar becomes a sparkline of
+  the last 64 samples (about a minute at the default interval), coloured by
+  the newest one. A tick that reads `n/a` pauses the line instead of dropping
+  it to zero. The series follow their rows when you reorder metrics or apply
+  settings. The battery always draws a plain level bar.
+- **Red label.** A load row (CPU, RAM, GPU, GPU memory, per-core CPU,
+  temperature) turns its label red at 90% or more (90 °C for a temperature).
+  Disk, network and battery never do: a fast download is not an alarm.
+- **Pending marker.** CPU, per-core CPU, GPU, disk and network values are
+  differences between two samples, so for up to a second after the start, and
+  after a change to the metric list, they show `…` over an empty track instead
+  of a made-up first value.
+- **Size.** 200 px wide at the default 13 px font and 100% scaling; the width
+  grows with the font. At that size the height is 36 px plus 36 px per row (3
+  rows: 144 px). TinyMon is Per-Monitor-V2 DPI aware: it stays sharp and
+  rescales when it moves to a monitor with another scaling.
+- **+N.** The widget is never taller than its monitor's work area. When the
+  rows do not fit, it shows the rows that fit, whole, and the header counts the
+  rest (`+2`). The hidden rows are the last ones in your order, so put the
+  important metrics above a long one such as per-core CPU.
+- **Look.** Dark by default; menu, **Light theme** switches the widget to a
+  light one. The opacity is set in Settings.
 
-- **Rust** (stable) with the **MSVC** toolchain (`x86_64-pc-windows-msvc`)
-- **Visual Studio Build Tools** (the C++ "Desktop development" workload, which
-  provides `link.exe`) and a **Windows 10/11 SDK**
-
-`cargo` locates the MSVC linker automatically — no "Developer Command Prompt"
-needed.
-
-## Build
-
-```sh
-cargo build --release
-```
-
-The binary is produced at:
-
-```
-target\release\tinymon.exe
-```
-
-Just run it (double-click or from a shell). It's a self-contained executable —
-copy it anywhere, including a USB stick.
-
-### Optional: temperature support
-
-Temperature readings are behind an off-by-default Cargo feature so the standard
-build pulls in **no** COM/WMI bindings and stays tiny:
-
-```sh
-cargo build --release --features temp
-```
-
-This enables the **Temperature** metric (adds ~3.5 KB). At runtime it reads from
-**LibreHardwareMonitor** — see [Temperature](#temperature-optional).
-
-## Usage
+## Using it
 
 | Action | How |
 |---|---|
-| Move the window | Click-drag anywhere on it |
-| Open settings | Right-click → **Settings…** (or a hotkey you bind) |
-| Show/hide | Left-click the tray icon (or menu → Show/Hide, or a hotkey) |
-| Context menu | Right-click the tray icon **or** the window |
-| Start with Windows | Menu → "Start with Windows" (checkmark = on) |
-| Hide to tray | Close (Alt+F4) or press **Esc** — it does **not** quit |
-| Quit | Menu → **Exit** (only this exits; the tray icon is removed) |
+| Move the widget | drag it from anywhere |
+| Menu | right-click the widget or the tray icon |
+| Show / hide | left-click the tray icon (a double-click toggles once), menu, **Hide** / **Show**, or the Show / Hide hotkey |
+| Settings | menu, **Settings...**, or the Open settings hotkey |
+| Hide to the tray | Esc (click the widget first, so that it has the focus) or Alt+F4: it keeps running |
+| Quit | menu, **Exit** (saves the settings and removes the tray icon) |
 
-The window updates once per second by default (configurable, 250 ms – 10 s).
+The menu: **Hide** (or **Show**), **Settings...**, **Lock (click-through)**,
+**Move to corner** (top-left, top-right, bottom-left, bottom-right), **Light
+theme**, **Start with Windows** and **Exit**.
 
-## Settings & customization
+- **Lock (click-through)** makes the widget ignore the mouse, so it never
+  blocks a click on what is below it. While it is locked, use the tray icon's
+  menu to unlock it. The lock is not saved: TinyMon starts unlocked.
+- **Move to corner** puts the widget in a corner of its monitor's work area,
+  24 px from the edges (scaled with the display).
+- Showing the widget never activates it, so it does not take the keyboard
+  focus from the app you are in: not from the tray, the hotkey, at start or on
+  a second launch.
+- The tray icon is drawn at the taskbar's icon size, so it stays sharp at any
+  scaling. It comes back after Explorer restarts, and a failed add is retried
+  every 2 seconds, up to 10 times.
 
-Right-click the window or tray icon → **Settings…** opens a native window with
-three control sections plus a **live preview**:
+**Where the widget goes.** The widget's home is the spot you chose: where you
+dropped it after a drag (a click that does not move it changes nothing), or the
+corner you picked. On the first run it is the top-right corner of the primary
+monitor. When home does not fit the screen any more (a monitor is missing,
+asleep or set to another resolution, or the taskbar moved), the widget is
+placed inside the nearest work area and home is kept, so the widget goes back
+when home fits again. When the widget grows or shrinks (a new font, more or
+fewer rows), the edges nearest to the screen's edges stay put, so a widget in a
+corner grows away from it, and home moves along while the widget is at home.
 
-- **Metrics** — checkboxes (two columns) to show/hide each metric. Toggling one
-  off rebuilds the active set and drops the disabled sampler (closing its
-  performance-counter query), so hidden metrics use **no resources**.
-- **Appearance** — **opacity** (slider with a live readout), **update interval**
-  (ms), and **font size** (px). Font size scales the whole widget — bigger font
-  means taller rows *and* a proportionally wider window, so nothing clips.
-- **Hotkeys** — capture fields for two **global hotkeys** (*toggle visibility*,
-  *open settings*) that work from any app, each with a **Clear** button to remove
-  the binding.
-- **Live preview** — a mini-widget drawn with the *same* renderer as the real
-  widget, updating as you toggle metrics / drag opacity / change the font. It
-  uses representative values, so it opens no performance-counter queries.
-- **Reset** — restores every control to the factory defaults (you still click
-  Apply / OK to commit).
+**One TinyMon at a time.** Starting TinyMon again, from any copy, brings the
+running widget back (shown, at home, with its tray icon) and the new launch
+ends. So two portable copies in different folders cannot run at the same
+time. A launch at normal rights next to a TinyMon that runs as administrator
+does run as a second instance (Windows does not let it reach the first). A
+debug build always runs, for development.
 
-Full keyboard support: **Tab** between fields, **Space** toggles a checkbox,
-**Enter** = OK, **Esc** = Cancel. Changes apply live (no restart) on **Apply**
-or **OK**, and are saved to the portable config.
+## Settings
 
-## Portable config (USB-safe)
+**Settings...** opens one settings window (asking again brings it to the
+front). It is always dark (TinyMon draws its buttons, checkboxes and slider
+itself; **Light theme** changes only the widget), and it opens inside the work
+area of the nearest monitor. Changes apply live on **Apply** or **OK** and are
+saved; **Cancel**, Esc or closing the window drops them.
 
-Everything is saved to **`tinymon.cfg`** (a tiny `key=value` text file). The save
-location is chosen by an actual *test write*, never guessed:
+- **Metrics**: every metric in one list, the enabled ones first in their
+  display order. The checkbox switches a metric on or off; the ▲ and ▼ buttons
+  move it up or down, and the keyboard focus moves with it, so pressing Space
+  or Enter again keeps moving the same metric. A double-click moves it two
+  rows. The arrows belong to the rows: a click acts on the metric that is in
+  that row now.
+- **Appearance**: the opacity slider (40-255) with its value, the update
+  interval (250-10000 ms) and the font size (9-16 px). The two boxes take
+  digits: a number out of range is set to the nearest end of the range, any
+  other text keeps the current value, and after Apply each box shows the value
+  that applies. The font scales the whole widget: taller rows and a wider
+  window.
+- **Hotkeys**: a field and a **Clear** button for each hotkey, Show / Hide and
+  Open settings, with a note beside the field when there is something to know
+  (see [Hotkeys](#hotkeys)).
+- **Live preview**: the real widget renderer at the widget's true size, with
+  sample values (it opens no counters). It follows the metric list, the order,
+  the opacity and the font as you change them, in the widget's light or dark
+  theme. Only a layout taller than its pane is scaled down, and it never shows
+  `+N`.
+- **Reset** fills the controls with the defaults (CPU, RAM and GPU, opacity
+  220, 1000 ms, 13 px, no hotkeys); it applies nothing until Apply or OK.
 
-1. **Next to the `.exe`** if that folder is writable — portable mode, ideal for
-   USB sticks.
-2. Otherwise **`%APPDATA%\TinyMon\tinymon.cfg`** (e.g. when run from a read-only
-   stick or `C:\Program Files`).
+Keyboard: Tab and Shift+Tab move between the controls, Space toggles a checkbox
+or presses a button, Enter presses the focused button (Reset, Clear, Apply,
+Cancel, an arrow) and means OK anywhere else, and Esc cancels. When you come
+back to the window, the focus returns to the control you left.
 
-So the same `.exe` works copied to a USB drive and run on any PC.
+The window follows the scaling of the monitor it is on. On a screen 768 px
+tall at 125% scaling or more it is taller than the work area: it keeps its top
+edge on the screen.
 
-It's plain text and safe to hand-edit (unknown keys are ignored, and a leading
-UTF-8 BOM from editors like Notepad is tolerated). Keys:
+## Hotkeys
+
+Two optional global hotkeys, **Show / Hide** and **Open settings**. In
+Settings, click a field and press the combo; **Clear** removes it.
+
+- **Bare keys are allowed**, but Windows then gives the key to TinyMon in
+  every app: it stops reaching any other program. The note **Blocks typing
+  this key** (amber) marks a key that types text (a letter, a digit, a
+  punctuation key, Space, Enter, ...), bare or with Shift only. Other bare
+  keys (Esc, Delete, the arrows, the F keys, media keys) are taken the same way,
+  without a note.
+- **Win combos are set in the config file only.** The Windows hotkey field
+  cannot show or capture the Win key. A Win combo from `tinymon.cfg` shows in
+  its field without Win, with the note **+ Win (set in config)**, and Apply
+  keeps it as long as the field still reads it that way. A Win combo typed
+  into a field, or moved there from the other action, is saved without Win.
+  So to change a saved `Win+Ctrl+T` to `Ctrl+T`, clear the field and Apply,
+  then set the new combo and Apply again (or edit the file).
+- **One combo cannot serve both actions.** Settings refuses it: the note
+  **Same as Show / Hide** appears, OK keeps the window open and Apply does
+  nothing until one of the two fields changes. A config file edited by hand to
+  use one combo for both gets only the first registered.
+- **A combo another app holds** cannot be registered. At startup this fails
+  silently; the field then shows **In use by another app**. Every Apply tries
+  the failed combos again, and a message box lists the combos changed in that
+  Apply that still failed.
+- **TinyMon's own combos can be moved.** While a hotkey field has the focus, a
+  combo TinyMon has registered goes into the field instead of running its
+  action.
+- While a field has the focus, pressing Shift, Ctrl or Alt alone (as in
+  Shift+Tab or Alt+Tab) does not wipe it, and Tab, Enter and Esc still move
+  through the window. Arrow and navigation keys show under their own names
+  (`Left`, not `Num 4`). The Windows field shows a saved Pause with an empty
+  name and Print Screen as `Sys Req`.
+
+In the config file a hotkey is optional modifiers (`Ctrl` or `Control`, `Alt`,
+`Shift`, `Win` or `Super`) and exactly one key, joined with `+`, in any case:
+a letter, a digit, `F1` to `F24`, or a virtual-key code in hex for any other
+key (`0xDD` is `]` on a US keyboard, `0x25` the Left arrow). TinyMon writes
+them back as `Ctrl+Alt+Shift+Win+Key`. A hotkey line it cannot read (an unknown
+key, two keys such as `Ctrl+A+B`) binds nothing and is dropped at the next
+save.
+
+## Temperature
+
+Windows has no vendor-neutral temperature interface for a normal user process.
+TinyMon reads the ACPI thermal zones that Windows publishes through PDH
+(`\Thermal Zone Information(*)\Temperature`), which needs no admin rights and
+no other software.
+
+- A zone is shown only once its reading has changed (by at least one kelvin,
+  the counter's step). Many desktop boards publish a firmware stub that reads
+  the same value at any load, and a reading that never moves says nothing.
+  Once a zone has moved it stays shown until TinyMon exits, also after a change
+  in Settings.
+- The labels say what is read: `ACPI Temp` for a board's only zone, otherwise
+  `ACPI` and the zone's firmware name (`ACPI THRM`). A zone is never called
+  "CPU Temp": what it measures is up to the firmware.
+- With no zone to show, the metric keeps one `Temp n/a` row, so you can see it
+  is on. A real sensor that has not moved since TinyMon started reads `n/a`
+  until it first does; on many desktops it never shows a value. Readings
+  outside 1-150 °C are ignored.
+- Temperature is off by default. TinyMon does not read GPU temperatures, and it
+  does not use LibreHardwareMonitor.
+
+The metric is behind the `temp` Cargo feature, which is on by default; a build
+with `--no-default-features` has no Temperature metric and no `temp` token.
+
+## GPU and GPU memory
+
+GPU support is vendor-neutral by design: every non-software adapter that DXGI
+finds is shown (discrete or integrated, AMD, Intel or NVIDIA; the Microsoft
+Basic Render Driver is skipped), using only DXGI and Windows' own PDH counters,
+the sources Task Manager reads. No vendor SDK (ADLX, NVML, ...) is involved,
+so one exe behaves the same on a gaming PC and on a laptop with integrated
+graphics.
+
+- **Load**: each process gets its own `GPU Engine` instance per engine.
+  TinyMon adds up the processes on each engine and shows the busiest engine,
+  which is what Task Manager calls the GPU's load. Each GPU counts only its own
+  engines, matched by its adapter LUID.
+- **Memory**: from the adapter-wide `GPU Adapter Memory` counters (Windows 10
+  1709 or later). An integrated GPU, which uses shared system memory, shows
+  `GPU Mem`: dedicated plus shared usage out of dedicated plus shared memory,
+  Task Manager's "GPU memory". A discrete GPU shows `VRAM`: dedicated usage out
+  of its dedicated memory. Integrated or discrete is decided from the memory
+  budgets DXGI reports. The settings list and the config token still say VRAM
+  (`vram`).
+- The GPU's name is shortened: `Intel(R) UHD Graphics 730` reads
+  `Intel UHD 730`, `AMD Radeon RX 9070 XT` reads `RX 9070 XT`, and a Ryzen's
+  `AMD Radeon(TM) Graphics` reads `Radeon`.
+
+## Network
+
+The network rows add up the traffic of the hardware network adapters only, read
+from `GetIfTable2`. Virtual adapters, VPN adapters and filter drivers do not
+count, so traffic that passes through two of them is not counted twice. In a
+virtual machine whose adapter does not say it is hardware, the adapters with a
+connector count instead; with neither, the rows read `n/a`. Traffic that never
+reaches a physical adapter (loopback, a host talking to WSL or a Hyper-V
+internal switch) is not counted.
+
+## Configuration file
+
+Everything is saved to `tinymon.cfg`, a small `key=value` text file.
+
+**Where.** Next to the `.exe` when that folder is writable (decided by a real
+test write), which makes TinyMon portable, for example on a USB stick.
+Otherwise in `%APPDATA%\TinyMon\tinymon.cfg` (a read-only stick, `C:\Program
+Files`).
+
+**Which file is read.** TinyMon looks for both files. A portable install reads
+its own file first; a `%APPDATA%` file then only seeds its first run. An install
+that saves to `%APPDATA%` reads whichever of the two files is newer. A file
+that is missing or cannot be read is skipped; with none, the defaults apply.
+
+**Format.** One `key=value` per line. Blank lines, lines starting with `#` and
+trailing `# ...` comments are ignored, as are spaces around keys and values,
+unknown keys and lines without `=`. The file may be UTF-8 (with or without a
+BOM), ANSI, or UTF-16 with a byte order mark (what PowerShell 5.1's `Out-File`
+writes). TinyMon rewrites the whole file whenever it saves (for example after
+a drag, Move to corner, the theme or an Apply, and on Exit), in its own key
+order and without your comments. It saves by writing `tinymon.cfg.tmp`,
+flushing it to disk and renaming it over `tinymon.cfg`, so a crash leaves the
+old file or the new one, never a half-written one; if the rename is refused
+(another program holds the file), it writes the file in place instead. A
+failed save is not reported.
+
+An annotated example:
 
 ```ini
 x=100                     # window position (set automatically on move)
@@ -152,118 +300,177 @@ hotkey_toggle=Ctrl+Alt+M  # optional; e.g. Ctrl+Shift+F1
 hotkey_settings=Ctrl+Alt+S
 ```
 
-Valid `metrics` tokens: `cpu`, `ram`, `gpu`, `percpu`, `disk`, `net`, `uptime`
-(and `temp` in a `--features temp` build).
+| Key | Meaning | Values (default) |
+|---|---|---|
+| `x`, `y` | the widget's home: its top-left corner in desktop pixels (negative on a monitor left of or above the primary one) | whole numbers; both are needed; written on the first run and whenever home changes |
+| `metrics` | the enabled metrics, in display order | `cpu`, `ram`, `gpu`, `vram`, `percpu`, `disk`, `net`, `uptime`, `battery`, `temp`, separated by commas (`cpu,ram,gpu`). Unknown tokens are ignored and a repeated one counts once; `metrics=` with nothing hides every metric; a file without `metrics` gets the default |
+| `opacity` | how opaque the widget is | 40-255 (220); a lower number reads as 40 |
+| `interval_ms` | the update interval, in ms | 250-10000 (1000); out-of-range numbers are clamped |
+| `font_px` | the font size, in px; the widget scales with it | 9-16 (13); out-of-range numbers are clamped |
+| `hotkey_toggle` | the Show / Hide hotkey | a combo (none); see [Hotkeys](#hotkeys) |
+| `hotkey_settings` | the Open settings hotkey | a combo (none) |
+| `light` | the light widget theme | `true` or `false` (`false`); anything else reads as `false` |
+
+A value TinyMon cannot read (not a number, say) falls back to its default.
 
 ## Start with Windows
 
-The "Start with Windows" toggle writes a per-user registry value (no admin):
+The menu's **Start with Windows** uses the per-user Run key, so it needs no
+admin rights:
 
+```text
+HKCU\Software\Microsoft\Windows\CurrentVersion\Run    TinyMon = "<full path of tinymon.exe>"
 ```
-HKCU\Software\Microsoft\Windows\CurrentVersion\Run    TinyMon = <full exe path>
+
+- The checkmark means that Windows starts **this** exe at logon: the Run value
+  names its path (in quotes, or without them as earlier versions wrote it; the
+  case of the letters A-Z does not matter), and Task Manager's Startup tab has
+  not disabled the entry
+  (`HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run`,
+  value `TinyMon`).
+- Clicking an unchecked item points the entry at this exe, with the path in
+  quotes, and clears Task Manager's disabled flag. That also repairs an entry
+  left by an exe that has moved, one written by another copy, and one disabled
+  in Task Manager. Clicking a checked item deletes the Run value.
+
+## Requirements
+
+To run:
+
+- Windows 10 version 1703 or later, 64-bit. The DPI functions TinyMon uses are
+  bound at load time, so an older Windows refuses to start the exe. The GPU
+  memory rows need version 1709 (`n/a` before), and the settings window's dark
+  title bar needs version 2004 (before that it keeps a light one).
+- The Visual C++ runtime, `VCRUNTIME140.dll` (the Microsoft Visual C++
+  2015-2022 Redistributable, x64), which most Windows 10 and 11 machines
+  already have; the rest of the C runtime is part of Windows 10.
+- No admin rights, no services or drivers, no network access. The exe declares
+  `asInvoker` in its manifest.
+
+To build:
+
+- **Rust** (stable) with the **MSVC** toolchain (`x86_64-pc-windows-msvc`).
+- **Visual Studio Build Tools** (the "Desktop development with C++" workload,
+  for `link.exe`) and a **Windows 10/11 SDK**, whose resource compiler embeds
+  the icon, the version information and the manifest. Without it the build
+  still succeeds with a warning, and the exe has none of the three (it still
+  turns on Per-Monitor-V2 DPI awareness itself).
+
+`cargo` finds the MSVC linker by itself; no developer command prompt is needed.
+
+## Build
+
+```sh
+cargo build --release                        # with the Temperature metric (default)
+cargo build --release --no-default-features  # without it
 ```
 
-Toggling on writes it, off deletes it, and the current state is read on launch
-to show the checkmark.
+The exe is `target\release\tinymon.exe`. Copy it anywhere and run it.
 
-## GPU support — design note
+Sizes with Rust 1.96: **258,048 bytes** (252 KiB) for the default build and
+255,488 bytes without default features. The release profile optimises for size
+(`opt-level = "z"`, LTO, one codegen unit, `panic = "abort"`, stripped).
 
-GPU detection is intentionally **vendor-neutral**: it shows *any* GPU (discrete
-or integrated — AMD, Intel, NVIDIA) using only DXGI (VRAM) and Windows PDH
-performance counters (load). It deliberately does **not** depend on any vendor
-SDK (e.g. AMD ADLX/ADL or NVIDIA NVML), so one binary behaves the same on a
-discrete-GPU gaming PC and an integrated-GPU work PC. VRAM uses the DXGI *LOCAL*
-memory segment; integrated GPUs report a small local pool (shown in MiB).
+`build.rs` embeds `icon.ico` (icon resource 1, also the settings window's
+caption icon), the version information and `tinymon.manifest`: run as the
+invoking user (`asInvoker`), Windows 10 and 11, Per-Monitor-V2 DPI awareness.
 
-## Temperature (optional)
+## Tests
 
-Windows exposes **no** vendor-neutral temperature API to a normal user-mode
-process, so TinyMon reads temperatures from
-[**LibreHardwareMonitor**](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)
-(LHM) — a free, open-source tool that publishes sensor data to a WMI namespace
-(`ROOT\LibreHardwareMonitor`). This is vendor-neutral (any CPU/GPU LHM supports)
-and needs no admin rights in TinyMon itself.
+```sh
+cargo test                          # 225 tests, 2 diagnostics ignored
+cargo test --no-default-features    # 213 tests, 2 diagnostics ignored
+cargo test -- --ignored --nocapture dump_   # print the detected GPUs and GPU engines
+```
 
-To use it:
-
-1. Build with the feature: `cargo build --release --features temp`.
-2. Install and run **LibreHardwareMonitor**, and enable its WMI/"Remote Web
-   Server" sensor publishing (LHM exposes sensors to WMI when running).
-3. Enable **Temperature** in TinyMon's settings.
-
-When LHM isn't running, the metric shows a single **`Temp  n/a`** row rather than
-disappearing — and the COM/WMI calls fail gracefully (no hang, no crash). The
-default build doesn't include this code at all.
-
-> Verified here: clean compile, graceful **`n/a`** + crash-free operation when LHM
-> is absent, and the size delta (+3.5 KB). The *populated* readings path requires
-> a machine running LHM to confirm end-to-end.
-
-## FPS — why it's not included
-
-A per-application **frame rate** is a common ask, but Windows offers no
-vendor-neutral, **user-mode**, no-admin way to measure a *specific game's* render
-FPS, and every real approach gives up one of TinyMon's core promises:
-
-| Approach | Cost |
-|---|---|
-| **PresentMon / ETW** (how RTSS/CapFrameX work) | needs **Administrator** or *Performance Log Users* group to open an ETW trace |
-| **Bundle PresentMon.exe** | **+several MB** (~20× the size) and a second binary; still needs ETW rights |
-| **Overlay injection** (Fraps/RTSS-style) | **AV / anti-cheat flag it as malware**; fragile |
-| **`DwmGetCompositionTimingInfo`** | no-admin & tiny, but it's the **desktop compositor's** rate (≈ monitor Hz), *not* a game's FPS |
-
-So FPS is **deliberately deferred**. The architecture leaves a clean slot for it
-(see [`src/fps.rs`](src/fps.rs) for the rationale and a concrete integration
-sketch); if added later it would live behind an opt-in Cargo feature (like
-`temp`) using PresentMon/ETW — documented to require elevation, never injection.
-
-## Antivirus note (false positives)
-
-TinyMon is a small, **unsigned**, freshly-compiled binary that reads system
-performance counters and writes one registry Run value — a behavior profile that
-some heuristic/ML antivirus engines flag as a **false positive** (e.g. Symantec
-`Heur.AdvML.B`, or Microsoft Defender). It does nothing malicious: no network, no
-file writes outside its own config. If your AV quarantines it (symptoms: build
-fails with *"Access is denied (os error 5)"*, or the `.exe` shows 0 KB / goes
-missing), add a **folder exclusion** for the project/output directory, or restore
-it from quarantine. Code-signing the binary would avoid this for distribution.
+The tests cover the logic, most of it pure: the row formatters and the pending
+marker, placement and the widget's home, the sparkline history and geometry,
+the height cap, GPU load and memory, network deltas and adapter choice, PDH
+failures, battery and temperature rules, config parsing, decoding, load order
+and atomic saving, hotkey text, capture, routing and notes, the settings
+window's layout and preview fit, the single-instance decision and the Start
+with Windows matching. Some read the live system (PDH counters, DXGI, a
+message-only window, the embedded manifest). The config tests use fixed folders
+under `%TEMP%` (`tinymon_test_*`), so run one test suite at a time on a machine.
 
 ## Project structure
 
-```
+```text
+build.rs            embeds icon.ico, the version information and tinymon.manifest
+tinymon.manifest    asInvoker, Windows 10/11, Per-Monitor-V2
+icon.ico            the exe's icon (resource 1)
+rustfmt.toml        use_small_heuristics = "Max"
+.gitattributes      LF line endings; icon.ico is binary
+docs/design/        the design of the correctness pass
+prompt.txt          the original build brief
 src/
-  main.rs         window, message loop, double-buffered paint, tray + menu,
-                  live-apply of settings, hotkeys, DPI (WM_DPICHANGED), app icon
-  render.rs       shared renderer (render_rows) + layout/colors + geometry math
-                  (unit-tested) — used by BOTH the widget and the settings preview
-  dpi.rs          Per-Monitor-V2 awareness + Scale (logical->device px, tested)
-  icon.rs         runtime-drawn app/tray icon (pure pixel routine, unit-tested)
-  registry.rs     metric registry: MetricKey / MetricSource / build_sources +
-                  per-metric accents + sample_rows + pure formatters (unit-tested)
-  settings.rs     runtime Settings (defaults + clamps) <-> on-disk Config
-  settings_win.rs native settings window + live preview child + reset-to-defaults
-  hotkeys.rs      global-hotkey parse/format + register/unregister (unit-tested)
-  metrics.rs      CPU% / memory sampling + pure math (unit-tested)
-  pdh.rs          shared PDH performance-counter helper (open/sample/Drop-close)
-  gpu.rs          DXGI adapter enumeration + PDH GPU-load sampler
-  percpu.rs       per-core CPU sampler (PDH Processor(*))
-  disk.rs         disk throughput + busy% sampler (PDH PhysicalDisk)
-  net.rs          network throughput sampler (PDH Network Interface)
-  temp.rs         optional temperatures via LibreHardwareMonitor WMI (feature "temp")
-  fps.rs          FPS design notes (deferred — documentation only, emits no metric)
-  config.rs       portable tinymon.cfg load/save (unit-tested)
-  startup.rs      HKCU Run-key "Start with Windows" toggle
+  main.rs           the widget: window, message loop, paint, tray icon and menu,
+                    placement and resizing, hotkeys, single instance, the
+                    hand-off from the settings window
+  registry.rs       the metric registry (MetricKey, MetricSource, build_sources,
+                    collect_rows), the pending marker, the preview's sample rows
+  render.rs         the shared renderer (widget and preview): layout, bars,
+                    sparklines, the height cap and "+N"
+  history.rs        sparkline history, kept per row identity
+  placement.rs      where the widget goes: home, fitting a work area, resizing
+                    from a corner, Move to corner
+  settings.rs       runtime settings (defaults, clamps) to and from the config
+  settings_win.rs   the settings window: layout table, controls, live preview,
+                    hotkey capture and notes
+  config.rs         tinymon.cfg: parse, decode, which file to read, atomic save
+  hotkeys.rs        hotkey text, registration, the typing-key and retry rules
+  startup.rs        Start with Windows (Run and StartupApproved values)
+  dark.rs           the settings window's dark palette and dark-mode calls
+  dpi.rs            Per-Monitor-V2 awareness, Scale (logical to device pixels)
+  icon.rs           the tray icon, drawn at runtime
+  metrics.rs        CPU and memory sampling, the load colours
+  pdh.rs            the shared PDH counter helper
+  gpu.rs            DXGI adapters, GPU load, GPU memory
+  percpu.rs         per-core CPU
+  disk.rs           disk read and write
+  net.rs            network up and down
+  battery.rs        battery
+  temp.rs           ACPI thermal zones (feature "temp")
+  fps.rs            why there is no FPS metric (documentation only)
 ```
+
+## FPS: why it is not included
+
+A per-application frame rate is a common request, but Windows offers no
+vendor-neutral, user-mode, no-admin way to measure a specific game's render
+rate, and every real approach gives up one of TinyMon's promises:
+
+| Approach | Cost |
+|---|---|
+| **PresentMon / ETW** (how RTSS and CapFrameX work) | needs **Administrator** or the *Performance Log Users* group to open an ETW trace |
+| **Bundling PresentMon.exe** | **several MB** (about 20 times TinyMon) and a second binary; still needs ETW rights |
+| **Overlay injection** (Fraps or RTSS style) | **antivirus and anti-cheat tools flag it as malware**; fragile |
+| **`DwmGetCompositionTimingInfo`** | no admin and tiny, but it is the **desktop compositor's** rate (about the monitor's refresh rate), not a game's |
+
+So FPS is deliberately left out. [`src/fps.rs`](src/fps.rs) records the
+reasoning and how a metric would plug in: behind a Cargo feature of its own,
+as `temp` is, using PresentMon/ETW, documented to need elevation, and never by
+injection.
+
+## Antivirus note (false positives)
+
+TinyMon is a small, **unsigned**, freshly compiled program that reads
+performance counters and writes a registry Run value, a profile some heuristic
+antivirus engines flag as a **false positive** (for example Symantec's
+`Heur.AdvML.B`, or Microsoft Defender). It does nothing malicious: no network
+access, and no files written outside its config's folder. If your antivirus
+quarantines it (a build fails with *"Access is denied. (os error 5)"*, or the
+`.exe` shows 0 KB or disappears), add a folder exclusion for the project or
+output folder, or restore it from quarantine. Signing the binary would avoid
+this for distribution.
 
 ## Implementation notes
 
-- Pure Rust + the official [`windows`](https://crates.io/crates/windows) crate
-  for Win32/DXGI/PDH/registry bindings; only the needed crate features are enabled.
-- Release profile is size-optimized: `opt-level = "z"`, `lto = true`,
-  `codegen-units = 1`, `panic = "abort"`, `strip = true`.
-- Every `unsafe` block carries a comment explaining the Win32 call it makes.
-- Pure logic (CPU% math, byte→GiB, load→color, config parsing, adapter-name
-  cleanup) is covered by unit tests: `cargo test`.
+- Pure Rust and the [`windows`](https://crates.io/crates/windows) crate
+  (0.62.2), the only runtime dependency, with only the crate features TinyMon
+  uses; `winres` is a build-time dependency for the resources.
+- One UI thread, no worker threads. A metric that is off is never built.
+- Every `unsafe` block carries a `SAFETY` comment on the Win32 call it makes.
 
 ## License
 
