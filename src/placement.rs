@@ -6,8 +6,10 @@
 //! fitted inside that work area and marked displaced, while home is kept, so
 //! the widget returns home when its monitor does. A resize keeps the edges
 //! nearest the work area's edges in place and moves home along only when the
-//! widget was at home. Everything here is pure except the two work-area shims
-//! at the end.
+//! widget was at home and the resize tracks home (an Apply does; a tick's
+//! resize and a system relocation do not, and mark the widget displaced when
+//! they leave it away from home). Everything here is pure except the two
+//! work-area shims at the end.
 
 use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
@@ -69,8 +71,12 @@ pub fn place(home: (i32, i32), w: i32, h: i32, wa: RECT) -> ((i32, i32), bool) {
 /// Home and the displaced flag after a resize put the widget at `spot`. A
 /// clamped spot (fitting moved it) is never adopted: home is kept and the
 /// widget is displaced. An unclamped spot becomes home only when the resize
-/// tracks home (`track_home`; a system relocation does not) and the widget is
-/// neither displaced nor being dragged; otherwise both stay as they were.
+/// tracks home (`track_home`; a tick's resize or a system relocation does not)
+/// and the widget is neither displaced nor being dragged. Otherwise home is
+/// kept and the widget is displaced while it sits away from home, either
+/// because it was displaced already or because the resize does not track
+/// home, so a later resize that tracks home (an Apply) does not adopt that
+/// spot either; a resize that lands at home ends the displacement.
 pub fn after_relayout(
     home: Option<(i32, i32)>,
     spot: (i32, i32),
@@ -84,7 +90,7 @@ pub fn after_relayout(
     } else if track_home && !displaced && !in_move {
         (Some(spot), false)
     } else {
-        (home, displaced)
+        (home, home != Some(spot) && (displaced || !track_home))
     }
 }
 
@@ -218,6 +224,24 @@ mod tests {
         let (home, displaced) = after_relayout(Some(OWNER), (-228, -16), true, false, false, true);
         let got = after_relayout(home, (-240, -16), false, displaced, false, true);
         assert_eq!(got, (Some(OWNER), true));
+    }
+
+    /// A tick's resize or a system relocation (track_home false) keeps home.
+    /// When it puts the widget away from home, the widget is displaced, so
+    /// the next resize that tracks home (an Apply) keeps home as well; a
+    /// resize that lands at home ends the displacement.
+    #[test]
+    fn resize_without_track_home_away_from_home_displaces_the_widget() {
+        let spot = (-213, -52);
+        let (home, displaced) = after_relayout(Some(OWNER), spot, false, false, false, false);
+        assert_eq!((home, displaced), (Some(OWNER), true));
+        assert_eq!(after_relayout(home, spot, false, displaced, false, true), (Some(OWNER), true));
+        // At home it is not displaced, and a resize that brings a displaced
+        // widget back home ends the displacement, whether it tracks home or not.
+        let at_home = after_relayout(Some(OWNER), OWNER, false, false, false, false);
+        assert_eq!(at_home, (Some(OWNER), false));
+        assert_eq!(after_relayout(Some(OWNER), OWNER, false, true, false, false), at_home);
+        assert_eq!(after_relayout(Some(OWNER), OWNER, false, true, false, true), at_home);
     }
 
     #[test]
