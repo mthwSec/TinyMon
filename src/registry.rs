@@ -193,12 +193,10 @@ impl MetricKey {
         MetricKey::Battery,
         MetricKey::Temp,
     ];
-    /// The default enabled set; the rest are opt-in. Temperature is included
-    /// (it shows a native CPU temp even without LibreHardwareMonitor).
-    #[cfg(feature = "temp")]
-    pub const DEFAULT: [MetricKey; 4] =
-        [MetricKey::Cpu, MetricKey::Ram, MetricKey::Gpu, MetricKey::Temp];
-    #[cfg(not(feature = "temp"))]
+    /// The default enabled set, in both builds: what a config without a
+    /// `metrics=` key and "Reset to defaults" enable; the rest are opt-in.
+    /// Temperature is opt-in too: most desktops have no live thermal zone, so
+    /// it would show "Temp n/a" for good.
     pub const DEFAULT: [MetricKey; 3] = [MetricKey::Cpu, MetricKey::Ram, MetricKey::Gpu];
 }
 

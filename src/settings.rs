@@ -95,15 +95,23 @@ mod tests {
 
     #[test]
     fn defaults_reproduce_cpu_ram_gpu() {
+        // Temperature is opt-in in both builds: most desktops have no live
+        // thermal zone, so a fresh install would show "Temp n/a" for good.
         let s = Settings::from_config(&Config::default());
-        #[cfg(feature = "temp")]
-        assert_eq!(s.order, vec![MetricKey::Cpu, MetricKey::Ram, MetricKey::Gpu, MetricKey::Temp]);
-        #[cfg(not(feature = "temp"))]
         assert_eq!(s.order, vec![MetricKey::Cpu, MetricKey::Ram, MetricKey::Gpu]);
         assert_eq!(s.opacity, DEFAULT_OPACITY);
         assert_eq!(s.interval_ms, DEFAULT_INTERVAL_MS);
         assert_eq!(s.font_px, DEFAULT_FONT_PX);
         assert_eq!(s.hotkey_toggle, None);
+        assert_eq!(Settings::defaults(), s); // what "Reset to defaults" applies
+    }
+
+    #[cfg(feature = "temp")]
+    #[test]
+    fn explicit_temp_in_config_is_kept() {
+        // Only the default changed: a config that lists temp keeps it.
+        let c = Config { metrics: Some(vec!["cpu".into(), "temp".into()]), ..Default::default() };
+        assert_eq!(Settings::from_config(&c).order, vec![MetricKey::Cpu, MetricKey::Temp]);
     }
 
     #[test]
