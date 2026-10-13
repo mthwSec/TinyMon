@@ -9,9 +9,9 @@
 use windows::Win32::Foundation::{COLORREF, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
     CreatePen, DeleteObject, DrawTextW, FillRect, GetStockObject, GetTextExtentPoint32W, Polygon,
-    Polyline, SelectObject, SetBkMode, SetDCBrushColor, SetTextColor, DC_BRUSH, DT_END_ELLIPSIS,
-    DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, HBRUSH, HDC, HFONT, HGDIOBJ, NULL_PEN, PS_SOLID,
-    TRANSPARENT,
+    Polyline, SelectObject, SetBkMode, SetDCBrushColor, SetTextColor, DC_BRUSH, DRAW_TEXT_FORMAT,
+    DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, HBRUSH, HDC, HFONT,
+    HGDIOBJ, NULL_PEN, PS_SOLID, TRANSPARENT,
 };
 
 use crate::dpi::Scale;
@@ -162,10 +162,10 @@ pub unsafe fn render_rows(
     // (the whole window already drags via HTCAPTION).
     SetTextColor(hdc, COLORREF(theme.header_fg));
     let mut hdr = RECT { left: pad, top: pad, right: content_right, bottom: pad + lh };
-    DrawTextW(hdc, &mut wide("TinyMon"), &mut hdr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    draw_text(hdc, "TinyMon", &mut hdr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     // The count of the rows left out, right-aligned in the same band.
     if let Some(more) = more {
-        DrawTextW(hdc, &mut wide(&more), &mut hdr, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+        draw_text(hdc, &more, &mut hdr, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
     }
     let sep_y = pad + lh + scale.px(2);
     paint_rect(
@@ -264,14 +264,14 @@ unsafe fn draw_row(
         }
     };
     SetTextColor(hdc, label_color);
-    DrawTextW(
+    draw_text(
         hdc,
-        &mut wide(&row.label),
+        &row.label,
         &mut label_rc,
         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
     );
     SetTextColor(hdc, COLORREF(theme.fg));
-    DrawTextW(hdc, &mut wide(&row.value), &mut value_rc, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+    draw_text(hdc, &row.value, &mut value_rc, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
 
     if let Some(frac) = row.bar {
         let bar_h = scale.px(BAR_H);
@@ -376,8 +376,12 @@ unsafe fn paint_rect(hdc: HDC, rc: &RECT, color: COLORREF) {
     FillRect(hdc, rc, HBRUSH(GetStockObject(DC_BRUSH).0));
 }
 
-/// Pixel width of `s` in the font currently selected into `hdc`.
+/// Pixel width of `s` in the font currently selected into `hdc`; 0 for an
+/// empty `s`, which is not passed on (its slice pointer dangles; see draw_text).
 unsafe fn text_width(hdc: HDC, s: &[u16]) -> i32 {
+    if s.is_empty() {
+        return 0;
+    }
     let mut sz = SIZE::default();
     let _ = GetTextExtentPoint32W(hdc, s, &mut sz);
     sz.cx
@@ -391,6 +395,25 @@ fn colorref(r: u8, g: u8, b: u8) -> COLORREF {
 /// UTF-16 encode a string for the wide Win32 text APIs.
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
+}
+
+/// `s` as UTF-16 for DrawTextW, or None for an empty `s`: the windows crate
+/// passes an empty slice's dangling pointer, and DrawTextW reads its first
+/// unit even when the count is 0.
+fn drawable(s: &str) -> Option<Vec<u16>> {
+    let text = wide(s);
+    (!text.is_empty()).then_some(text)
+}
+
+/// Draw `s` into `rc` with `fmt` plus DT_NOPREFIX, so that an '&' (in a GPU
+/// name, say) is drawn as text rather than taken as a mnemonic prefix. An
+/// empty string is not drawn at all (drawable) and leaves `rc` untouched, even
+/// with DT_CALCRECT. `fmt` must not include DT_MODIFYSTRING: the buffer has no
+/// room for the ellipsis DrawTextW would write into it.
+unsafe fn draw_text(hdc: HDC, s: &str, rc: &mut RECT, fmt: DRAW_TEXT_FORMAT) {
+    if let Some(mut text) = drawable(s) {
+        DrawTextW(hdc, &mut text, rc, fmt | DT_NOPREFIX);
+    }
 }
 
 #[cfg(test)]
@@ -457,6 +480,73 @@ mod tests {
         assert!(shown <= 20);
         assert_eq!(h, window_height(Scale(144), shown as i32, 13));
         assert_eq!(widget_size(Scale(96), 13, 5, 1080), (200, 216, 5));
+    }
+
+    /// Not a spec test: rows with an empty label or value draw without a
+    /// crash. A GPU whose driver reports a blank name gave an empty label, and
+    /// the windows crate passes an empty slice's dangling pointer to
+    /// DrawTextW, which reads its first unit even when the count is 0.
+    #[test]
+    fn empty_texts_draw_without_a_crash() {
+        use super::{render_rows, THEME};
+        use crate::registry::Row;
+        use windows::Win32::Graphics::Gdi::{
+            CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetStockObject,
+            SelectObject, DEFAULT_GUI_FONT, HFONT, HGDIOBJ,
+        };
+        let rows = [
+            cpu_row(12.0),
+            gpu_row("", Some(30.0)),
+            Row { value: String::new(), ..gpu_row("GPU", None) },
+        ];
+        let hist: Vec<&[f32]> = vec![&[]; rows.len()];
+        let (w, h) = (200, window_height(Scale(96), rows.len() as i32, 13));
+        unsafe {
+            let dc = CreateCompatibleDC(None);
+            let bmp = CreateCompatibleBitmap(dc, w, h);
+            assert!(!dc.0.is_null() && !bmp.0.is_null());
+            let old = SelectObject(dc, HGDIOBJ(bmp.0));
+            let font = HFONT(GetStockObject(DEFAULT_GUI_FONT).0);
+            render_rows(dc, w, h, &rows, font, Scale(96), 13, &THEME, &hist);
+            SelectObject(dc, old);
+            let _ = DeleteObject(HGDIOBJ(bmp.0));
+            let _ = DeleteDC(dc);
+        }
+    }
+
+    /// Not a spec test: an empty string is never handed to DrawTextW. This
+    /// pins the rule on any Windows build; empty_texts_draw_without_a_crash
+    /// shows why, on builds whose DrawTextW reads the first unit at count 0.
+    #[test]
+    fn empty_strings_are_not_drawable() {
+        use super::drawable;
+        assert_eq!(drawable(""), None);
+        assert_eq!(drawable("R&D").as_deref(), Some(&[0x52, 0x26, 0x44][..]));
+    }
+
+    /// Not a spec test: an '&' in a label (a GPU name such as "R&D") is drawn
+    /// as text, not taken as a mnemonic prefix that hides it.
+    #[test]
+    fn ampersands_draw_as_text() {
+        use super::draw_text;
+        use windows::Win32::Graphics::Gdi::{
+            CreateCompatibleDC, DeleteDC, GetStockObject, SelectObject, DEFAULT_GUI_FONT,
+            DT_CALCRECT, DT_SINGLELINE,
+        };
+        unsafe {
+            let dc = CreateCompatibleDC(None);
+            assert!(!dc.0.is_null());
+            let old = SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
+            let width = |s: &str| {
+                let mut rc = RECT::default();
+                draw_text(dc, s, &mut rc, DT_SINGLELINE | DT_CALCRECT);
+                rc.right - rc.left
+            };
+            assert!(width("R&D") > width("RD"), "{} vs {}", width("R&D"), width("RD"));
+            assert_eq!(width(""), 0);
+            SelectObject(dc, old);
+            let _ = DeleteDC(dc);
+        }
     }
 
     #[test]

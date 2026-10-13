@@ -227,7 +227,7 @@ fn utf16_to_string(buf: &[u16]) -> String {
 /// Shorten a verbose adapter description toward a compact label, e.g.
 /// "AMD Radeon RX 9070 XT" -> "RX 9070 XT", "Intel(R) UHD Graphics 770" ->
 /// "Intel UHD 770", "AMD Radeon(TM) Graphics" -> "Radeon". Falls back to the
-/// trimmed original if cleanup empties it.
+/// trimmed original if cleanup empties it, and to "GPU" for a blank one.
 pub fn short_name(desc: &str) -> String {
     let mut s = desc.to_string();
     for junk in ["(R)", "(TM)", "(C)", "®", "™"] {
@@ -254,10 +254,13 @@ pub fn short_name(desc: &str) -> String {
     if s == "Graphics" {
         s = branded.replace(" Graphics", "");
     }
-    if s.is_empty() {
-        desc.trim().to_string()
-    } else {
+    if !s.is_empty() {
         s
+    } else if desc.trim().is_empty() {
+        // A driver that reports a blank name: the row still needs a label.
+        "GPU".to_string()
+    } else {
+        desc.trim().to_string()
     }
 }
 
@@ -617,6 +620,10 @@ mod tests {
         // The one whitespace squash, right after junk removal, also trims and turns
         // tabs into single spaces; no later step adds a space.
         assert_eq!(short_name("  Intel(R)\tUHD   Graphics 770 "), "Intel UHD 770");
+        // A driver that reports a blank name still gets a label.
+        for blank in ["", "   ", "\t", "\u{3000}", "\u{a0}"] {
+            assert_eq!(short_name(blank), "GPU", "{blank:?}");
+        }
         assert_eq!(short_name("\tNVIDIA GeForce  RTX 4080\t"), "RTX 4080");
     }
 
