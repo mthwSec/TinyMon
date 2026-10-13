@@ -5,7 +5,8 @@
 //! Writability is decided by an actual test write, never guessed — so the same
 //! .exe runs from a read-only USB stick, Program Files, or a normal folder.
 //!
-//! Loading starts from the file this install saves to (see `load`), and the
+//! A portable install (one that saves next to its .exe) loads its own file
+//! first, any other install the newer of the two files (see `load`). The
 //! file's bytes are decoded leniently (`decode`): a UTF-16 or ANSI file reads
 //! as what it says instead of as "no config". Saving (`write`) normally renames
 //! a fully written temp file over the old one, so a crash leaves the old file or
@@ -45,8 +46,9 @@ pub struct Config {
 /// tokens, and hotkeys as `format_hotkey` writes them).
 pub fn parse(text: &str) -> Config {
     let mut cfg = Config::default();
-    // Tolerate a UTF-8 BOM: editors (e.g. Notepad saving "UTF-8 with BOM")
-    // prepend U+FEFF, which would otherwise corrupt the first key.
+    // A leading U+FEFF (a byte order mark) would corrupt the first key.
+    // `decode` already drops a file's BOM when `load` reads it; this guards
+    // text handed to parse directly.
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     for line in text.lines() {
         let line = line.trim();
@@ -117,13 +119,13 @@ pub fn serialize(cfg: &Config) -> String {
     s
 }
 
-/// Load the config, starting from the file this install saves to: `write_path`
-/// is what `resolve_write_path` returned. A portable install (one that saves
-/// next to its .exe) reads its own file first even when `%APPDATA%` holds a
-/// newer one, which then only seeds a first run, because another install may
-/// have written it. Otherwise the newer file wins, so a save made while the .exe
-/// folder was still writable is not shadowed by an older `%APPDATA%` file. A
-/// missing or unreadable file falls through to the next; with none, defaults.
+/// Load the config; `write_path` is what `resolve_write_path` returned. A
+/// portable install (one that saves next to its .exe) reads its own file first
+/// even when `%APPDATA%` holds a newer one, which then only seeds a first run,
+/// because another install may have written it. Otherwise the newer file wins,
+/// so a save made while the .exe folder was still writable is not shadowed by
+/// an older `%APPDATA%` file. A missing or unreadable file falls through to the
+/// next; with none, defaults.
 pub fn load(write_path: Option<&Path>) -> Config {
     let found = read_candidates()
         .into_iter()

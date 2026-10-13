@@ -1,6 +1,6 @@
 //! The tray icon, drawn at runtime with GDI at the taskbar's small-icon size
-//! (16 px at 100%, up to 32 px at 200%): a tiny bar graph (echoing the widget)
-//! on a dark rounded square. The exe's own icon is a separate asset,
+//! (16 px at 100%, 32 px at 200%, larger above): a tiny bar graph (echoing the
+//! widget) on a dark rounded square. The exe's own icon is a separate asset,
 //! `icon.ico`, which build.rs embeds as icon resource 1.
 
 use core::ffi::c_void;

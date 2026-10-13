@@ -124,9 +124,10 @@ const FONT_CHARS: usize = 2;
 
 thread_local! {
     /// The settings window's DPI (96 = 100%), set in `build_controls` and again
-    /// on WM_DPICHANGED. Every coordinate/size/font goes through `dscale()` so
-    /// the window scales on high-DPI displays (the layout is authored in
-    /// logical 96-dpi units).
+    /// on WM_DPICHANGED. Every coordinate, size and font of the window and its
+    /// controls goes through `dscale()`, so the window scales on high-DPI
+    /// displays (the layout is authored in logical 96-dpi units); the preview
+    /// renders at its own window's DPI (`paint_preview`).
     static SCALE: Cell<u32> = const { Cell::new(96) };
     /// The settings window's Segoe UI fonts — regular for controls, semibold for
     /// section titles. Built per-open at the window's DPI and again on a DPI
@@ -501,6 +502,8 @@ fn reorder_step(len: usize, row: usize, up: bool, double: bool) -> Option<(usize
     (to < len).then_some((from, to))
 }
 
+/// The settings window's procedure. The `unsafe extern "system"` signature is
+/// mandated by Win32; each arm documents the calls it makes.
 unsafe extern "system" fn settings_proc(
     hwnd: HWND,
     msg: u32,
@@ -523,6 +526,8 @@ unsafe extern "system" fn settings_proc(
         // only then are the old fonts freed, which the controls used until
         // then. The window then takes its size at the new DPI, at the top-left
         // of the rect Windows suggests (lParam), or where it is without one.
+        // Unlike open(), it is not fitted into the work area again: a window
+        // that grew near a screen edge can reach past it until it is moved.
         WM_DPICHANGED => {
             SCALE.with(|c| c.set(dpi_from_wparam(wparam)));
             let old = make_fonts();
@@ -735,6 +740,9 @@ unsafe extern "system" fn settings_proc(
     }
 }
 
+/// Create every child control of the settings window `hwnd` (its WM_CREATE),
+/// seeded from the settings of the widget `main`: each at its Place at the
+/// window's DPI, in creation (Tab) order (created_ids).
 unsafe fn build_controls(hwnd: HWND, main: HWND) {
     let hinstance = HINSTANCE(GetModuleHandleW(None).map(|h| h.0).unwrap_or(core::ptr::null_mut()));
     SCALE.with(|c| c.set(dpi_for_window(hwnd)));
@@ -747,6 +755,9 @@ unsafe fn build_controls(hwnd: HWND, main: HWND) {
     // Each control goes to its Place (control_places), authored in logical
     // (96-dpi) units and scaled to the window's DPI.
     let s = dscale();
+    // SAFETY: `control` creates a child of this live window from a static
+    // class name, a text it copies and this control's scaled Place, then sends
+    // the child its font and theme.
     let child = |class, text, style: u32, id| unsafe {
         let p = places.iter().find(|p| p.id == id).copied().unwrap_or_default();
         let (x, y, w, h) = p.scaled(s);
@@ -894,9 +905,10 @@ unsafe extern "system" fn preview_proc(
 }
 
 /// Where the preview puts a widget of `nat_w` x `nat_h` device pixels in a
-/// pane of `pane_w` x `pane_h`: (x, y, w, h). 1:1 in the middle when it fits;
-/// else scaled down uniformly to the pane's width or height, whichever limits
-/// it, and centred the other way. All zero for an empty widget.
+/// pane of `pane_w` x `pane_h`: (x, y, w, h). The pane must not be empty
+/// (paint_preview checks). 1:1 in the middle when it fits; else scaled down
+/// uniformly to the pane's width or height, whichever limits it, and centred
+/// the other way. All zero for an empty widget.
 fn fit_preview(nat_w: i32, nat_h: i32, pane_w: i32, pane_h: i32) -> (i32, i32, i32, i32) {
     if nat_w <= 0 || nat_h <= 0 {
         return (0, 0, 0, 0);
@@ -999,7 +1011,8 @@ unsafe fn paint_preview(hwnd: HWND) {
     let _ = EndPaint(hwnd, &ps);
 }
 
-/// Create one child control and give it the standard GUI font.
+/// Create one child control and give it `font` (the window's Segoe UI
+/// control font, ui_font) and the dark control theme.
 #[allow(clippy::too_many_arguments)]
 unsafe fn control(
     parent: HWND,
@@ -1041,6 +1054,7 @@ unsafe fn control(
 unsafe fn cb_checked(cb: HWND) -> bool {
     GetWindowLongPtrW(cb, GWLP_USERDATA) != 0
 }
+/// Check or uncheck an owner-drawn metric checkbox (see `cb_checked`).
 unsafe fn set_cb_checked(cb: HWND, on: bool) {
     SetWindowLongPtrW(cb, GWLP_USERDATA, on as isize);
 }
@@ -1321,7 +1335,8 @@ unsafe fn clear_hotkey(dlg: HWND, id: i32) {
     }
 }
 
-/// Set a control's text (used to update the live opacity readout).
+/// Set a control's text: the opacity readout, the metric checkbox labels, the
+/// hotkey notes, and the interval and font edits (the write-back and Reset).
 unsafe fn set_text(ctrl: HWND, text: &str) {
     let mut w: Vec<u16> = text.encode_utf16().collect();
     w.push(0);
@@ -1332,6 +1347,8 @@ fn range(lo: u32, hi: u32) -> LPARAM {
     LPARAM((((lo & 0xFFFF) | ((hi & 0xFFFF) << 16)) as i32) as isize)
 }
 
+/// The position of trackbar `id` of `dlg` (the opacity), or 220, the default,
+/// without the control.
 unsafe fn read_trackbar(dlg: HWND, id: i32) -> i32 {
     match GetDlgItem(Some(dlg), id) {
         Ok(tb) => SendMessageW(tb, TBM_GETPOS, None, None).0 as i32,
@@ -1492,16 +1509,20 @@ fn spec_to_word(spec: HotkeySpec, ext: bool) -> u32 {
 /// Whether `vk` is an extended key, given `vsc_ex` =
 /// `MapVirtualKeyW(vk, MAPVK_VK_TO_VSC_EX)`. Page Up, Page Down, End, Home,
 /// the arrows, Insert, Delete and Num Lock are listed by vk, because that
-/// mapping returns their numpad scan codes; any other key counts when its scan
-/// code has the E0 prefix (Pause's E1 prefix does not).
+/// mapping gives them no E0 prefix: the navigation keys get the scan codes of
+/// their numpad twins, and Num Lock gets 0x45, which unflagged the control
+/// names Pause. Any other key counts when its scan code has the E0 prefix
+/// (Pause's E1 prefix does not).
 fn needs_ext(vk: u32, vsc_ex: u32) -> bool {
     matches!(vk, 0x21..=0x28 | 0x2D | 0x2E | 0x90) || (vsc_ex & 0xFF00) == 0xE000
 }
 
 /// The hotkey Apply saves for one action, from the `saved` combo and what its
-/// `field` reads. The control cannot show Win, so a field the user did not
-/// touch reads a saved Win combo without Win; the saved combo then stays.
-/// Otherwise (no Win, or a field the user changed or cleared) the field wins.
+/// `field` reads. The control cannot show Win, so an untouched field reads a
+/// saved Win combo without Win: a field that reads exactly that counts as
+/// untouched (a combo typed in again too), and the saved combo stays.
+/// Otherwise (no Win, or a field that reads anything else, or nothing) the
+/// field wins.
 fn effective_hotkey(saved: Option<HotkeySpec>, field: Option<HotkeySpec>) -> Option<HotkeySpec> {
     if let (Some(s), Some(f)) = (saved, field) {
         let untouched = f.vk == s.vk && f.mods == (s.mods & !MOD_WIN.0);
@@ -1689,9 +1710,10 @@ mod tests {
 
     #[test]
     fn navigation_and_e0_keys_need_ext() {
-        // (vk, MapVirtualKeyW(vk, MAPVK_VK_TO_VSC_EX)). The navigation keys and
-        // Num Lock map to numpad scan codes, so needs_ext lists them by vk; the
-        // others count by their E0 prefix, and Pause's E1 prefix does not.
+        // (vk, MapVirtualKeyW(vk, MAPVK_VK_TO_VSC_EX)). The navigation keys map
+        // to their numpad twins' scan codes and Num Lock to 0x45 (Pause's name
+        // when unflagged), so needs_ext lists them by vk; the others count by
+        // their E0 prefix, and Pause's E1 prefix does not.
         for (vk, sc) in [
             (0x25, 0x004B), // Left
             (0x24, 0x0047), // Home
@@ -1865,8 +1887,8 @@ mod tests {
     fn scaled_controls_do_not_overlap_at_any_dpi() {
         // Controls that touch in logical units (each 18 px label and the field
         // right below it) must still only touch in device pixels, where
-        // build_controls and place_controls put them (Place::scaled), at every
-        // scale from 100% to 225%.
+        // build_controls and place_controls put them (Place::scaled), at each
+        // standard scale from 100% to 225% (the 25% steps).
         for n in [9, 10] {
             let places = control_places(n);
             for dpi in [96, 120, 144, 168, 192, 216] {
@@ -2136,7 +2158,10 @@ mod tests {
         // is a warning. The match has no wildcard arm, so a new note fails to
         // compile until it gets an arm, and its arm, at ALL's next index,
         // fails to compile until ALL holds it: a constant index past the end
-        // of an array is an error (rustc's unconditional_panic lint).
+        // of an array is an error (rustc's unconditional_panic lint). So a new
+        // note's arm takes ALL's next index (4 now), never one already used:
+        // an arm that reuses an index compiles, and this test then never looks
+        // at the new note.
         let entry = |n: HotkeyNote| match n {
             HotkeyNote::BlocksTyping => (HotkeyNote::ALL[0], true),
             HotkeyNote::PlusWin => (HotkeyNote::ALL[1], false),

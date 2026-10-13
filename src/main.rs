@@ -1,8 +1,10 @@
-//! TinyMon — a tiny, always-on-top Windows resource monitor.
+//! TinyMon, a tiny always-on-top Windows resource monitor.
 //!
-//! Metric rows are driven by a toggleable registry (`registry::MetricSource`)
-//! resolved from `settings::Settings`, rather than hardcoded. The window, tray,
-//! menu, double-buffered rendering, and portable config are unchanged.
+//! This module owns the widget: its window and message loop, the tray icon
+//! and the menu, placement and resizing, the double-buffered paint, the
+//! global hotkeys, the single-instance guard and the hand-off from the
+//! settings window. The metric rows come from a toggleable registry
+//! (`registry::MetricSource`) resolved from `settings::Settings`.
 
 // Build as a GUI app (no console window) for normal/release builds, but keep a
 // console under `cargo test` so unit-test output is visible.
@@ -182,8 +184,10 @@ struct AppState {
     /// leaves out included (place_widget, relayout).
     sized_rows: usize,
     /// True until the first sampling tick after startup, which puts the
-    /// widget at home for its row count instead of resizing it from a corner
-    /// (tick_layout), so home cannot move from one launch to the next.
+    /// widget at home for a changed row count instead of resizing it from a
+    /// corner (tick_layout), so the priming sample's row count cannot move
+    /// home. Rows that arrive on a later tick still resize the widget from a
+    /// corner, with home following (sync_layout).
     startup_layout_pending: bool,
     // Cached off-screen back buffer for double buffering; recreated on resize.
     back_dc: HDC,
@@ -197,8 +201,9 @@ struct AppState {
 }
 
 /// The widget's size for its current rows at the current DPI + font, at most
-/// `max_h` tall (whole rows; render_rows counts the rest as "+N"), and the row
-/// count it is sized for, rows left out included.
+/// `max_h` tall (whole rows; render_rows counts the rest as "+N") but never
+/// below the header-only height, and the row count it is sized for, rows left
+/// out included.
 fn fitted_size(st: &AppState, max_h: i32) -> (i32, i32, usize) {
     let mut tmp: Vec<Row> = Vec::new();
     for s in &st.sources {
@@ -348,7 +353,8 @@ fn tick_layout(startup: bool, sized: usize, n: usize, in_move: bool) -> TickLayo
 
 /// The period of the first tick after the sources are built (at startup and on
 /// a metric Apply): at most a second, so the pending marker shows only briefly.
-/// That tick re-arms the timer at the configured interval.
+/// When the cap shortened it (an interval above a second), that tick re-arms
+/// the timer at the configured interval.
 fn first_tick_ms(interval_ms: u32) -> u32 {
     interval_ms.min(1000)
 }
@@ -369,8 +375,9 @@ fn timer_period(interval_ms: u32, first_tick_pending: bool) -> u32 {
 fn main() -> Result<()> {
     // Per-Monitor-V2 DPI awareness must precede any window/GDI sizing.
     dpi::set_process_dpi_aware();
-    // SAFETY: the whole window lifecycle is Win32 FFI. Every call is annotated
-    // inline; all handles are produced by the OS and used only while valid.
+    // SAFETY: the whole window lifecycle is Win32 FFI. All handles are produced
+    // by the OS and used only while valid. The AppState box goes to the window
+    // through CreateWindowExW; WM_CREATE stores it and WM_DESTROY reclaims it.
     unsafe {
         // One TinyMon per session: a second launch brings the running widget
         // back and ends here, before it reads or writes any file.
@@ -406,7 +413,8 @@ fn main() -> Result<()> {
 
         // Resolve settings from the saved config, then build the enabled metric
         // sources (disabled metrics are never constructed -> use no resources).
-        // The write path is resolved first: loading starts from that file.
+        // The write path is resolved first: a portable install loads its own
+        // file first (config::load).
         let cfg_path = config::resolve_write_path();
         let cfg = config::load(cfg_path.as_deref());
         let settings = Settings::from_config(&cfg);
@@ -839,6 +847,9 @@ unsafe extern "system" fn wnd_proc(
                     st.font = nf;
                     st.in_move
                 };
+                // SAFETY: a non-null lParam of WM_DPICHANGED points to the
+                // suggested window RECT, valid while the message is handled;
+                // only the system sends it (another process cannot).
                 let r = lparam.0 as *const RECT;
                 let from = if r.is_null() { None } else { Some(*r) };
                 relayout(hwnd, from, !in_move, false);
@@ -847,7 +858,8 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
 
-        // Remove the tray icon, save position, free everything, end the loop.
+        // Remove the tray icon, save the settings (home included), free
+        // everything, end the loop.
         WM_DESTROY => {
             remove_tray_icon(hwnd);
             hotkeys::unregister(hwnd);
@@ -994,7 +1006,8 @@ unsafe fn start_tray_retry(hwnd: HWND) {
 
 /// One tick of the tray retry: add the icon again, and stop retrying once it
 /// is in the tray or after TRAY_MAX_TRIES tries. A shell that hangs can block
-/// each try for Shell_NotifyIconW's timeout, which the cap bounds.
+/// each try for up to twice Shell_NotifyIconW's timeout (NIM_ADD, then
+/// NIM_MODIFY), which the cap bounds.
 unsafe fn retry_tray_icon(hwnd: HWND) {
     let p = state_ptr(hwnd);
     if p.is_null() {
@@ -1232,8 +1245,10 @@ fn persist(st: &AppState) {
 }
 
 /// Open the settings window (single-instance: focus it if already open).
-/// settings_win::open sends messages to the widget, so no AppState reference
-/// is live across it; the state is fetched again to store the new window.
+/// settings_win::open sends messages to the widget, and the settings window's
+/// WM_CREATE reads the settings through current_settings, so no AppState
+/// reference is live across it; the state is fetched again to store the new
+/// window.
 unsafe fn open_settings(hwnd: HWND) {
     let p = state_ptr(hwnd);
     if p.is_null() {
@@ -1566,7 +1581,9 @@ mod tests {
     /// ticks count `steady`: WM_CREATE places it for the primed rows
     /// (place_widget), then the first tick catches up as `first_tick` says,
     /// with the rules place_widget and relayout apply. Returns home after
-    /// that tick, which Exit saves for the next launch.
+    /// that tick, which Exit saves for the next launch. The Keep and Place
+    /// arms restate place_widget's rule that it never moves an existing home;
+    /// they do not test it.
     fn launch(
         home: (i32, i32),
         wa: RECT,

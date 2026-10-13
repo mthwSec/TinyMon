@@ -103,6 +103,8 @@ type FnSetPreferredAppMode = unsafe extern "system" fn(i32) -> i32;
 type FnAllowDarkModeForWindow = unsafe extern "system" fn(HWND, i32) -> i32;
 type FnRefresh = unsafe extern "system" fn();
 
+/// uxtheme.dll, which holds the dark-mode entry points; None if it cannot be
+/// loaded.
 unsafe fn uxtheme() -> Option<HMODULE> {
     // SAFETY: uxtheme.dll ships with every supported Windows; null on failure.
     let h = LoadLibraryW(w!("uxtheme.dll")).ok()?;

@@ -38,10 +38,12 @@ impl PdhCounter {
 
     /// Collect a fresh sample: (lowercased instance name, value) for each valid
     /// instance. `None` when the reading failed: the counter was never added, or
-    /// collecting or formatting failed. `Some(empty)` means no instance was
-    /// reported (PDH_NO_DATA): no instances right now, a missing single
-    /// instance, or restricted access. It is not proof of health, so a caller
-    /// whose reading can never legitimately be empty maps it to n/a.
+    /// collecting or formatting failed. `Some(empty)` means no valid instance
+    /// was reported: PDH_NO_DATA (no instances right now, a missing single
+    /// instance, or restricted access), a zero-size result, or only items with
+    /// an invalid status or a value that is not finite. It is not proof of
+    /// health, so a caller whose reading can never legitimately be empty maps
+    /// it to n/a.
     pub fn try_sample(&self) -> Option<Vec<(String, f64)>> {
         if !self.ok {
             return None;
@@ -66,6 +68,9 @@ impl PdhCounter {
                 None,
             ) {
                 0 | PDH_MORE_DATA => {}
+                // Defensive: with one counter per query, PDH_NO_DATA comes
+                // from the collect above, so this arm is not reached (and has
+                // no test).
                 PDH_NO_DATA => return Some(out),
                 _ => return None,
             }

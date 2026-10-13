@@ -23,8 +23,9 @@ default = ["temp"]
 temp = []
 
 [build-dependencies]
-# Build-time only (not in the runtime binary): embeds the app icon + Windows
-# file details (version info) into the .exe via the SDK resource compiler.
+# Build-time only (not in the runtime binary): embeds the app icon, Windows
+# file details (version info) and the application manifest (tinymon.manifest)
+# into the .exe via the SDK resource compiler.
 winres = "0.1"
 
 [dependencies]

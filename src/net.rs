@@ -28,8 +28,9 @@ pub struct NetSampler {
     /// The last read: its time in seconds and the counted interfaces' octets;
     /// `None` when it failed or found nothing to count.
     prev: Option<(f64, Vec<IfOctets>)>,
-    /// Bytes per second; `None` when the rate is unknown.
+    /// Bytes per second sent; `None` when the rate is unknown.
     up_bps: Option<f64>,
+    /// Bytes per second received; `None` when the rate is unknown.
     down_bps: Option<f64>,
 }
 

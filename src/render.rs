@@ -1,9 +1,10 @@
 //! Shared widget renderer + layout math.
 //!
 //! Both the always-on-top widget and the settings live preview draw through
-//! [`render_rows`], the preview at the widget's true size, so the preview can
-//! never visually drift from the real widget. All sizes are authored in
-//! logical (96-dpi) units and converted to device pixels via [`Scale`].
+//! [`render_rows`], the preview at the widget's true size (scaled down only
+//! when taller than its pane), so the preview can never visually drift from
+//! the real widget. All sizes are authored in logical (96-dpi) units and
+//! converted to device pixels via [`Scale`].
 
 use windows::Win32::Foundation::{COLORREF, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
@@ -110,8 +111,9 @@ pub fn rows_fitting(scale: Scale, font_px: i32, max_h: i32, n: usize) -> usize {
 }
 
 /// The widget's width and height for `n` rows when it may be at most `max_h`
-/// tall (its work area's height), and how many rows it shows: whole rows only;
-/// the last rows in the user's order are left out, and the header counts them.
+/// tall (its work area's height; never below the header-only height,
+/// `window_height(0)`), and how many rows it shows: whole rows only; the last
+/// rows in the user's order are left out, and the header counts them.
 pub fn widget_size(scale: Scale, font_px: i32, n: usize, max_h: i32) -> (i32, i32, usize) {
     let shown = rows_fitting(scale, font_px, max_h, n);
     (win_w(scale, font_px), window_height(scale, shown as i32, font_px), shown)

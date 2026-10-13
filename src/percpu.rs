@@ -1,5 +1,5 @@
 //! Per-core CPU usage via the vendor-neutral PDH `\Processor(*)\% Processor
-//! Time` counter — one bar per logical core (the `_Total` instance is skipped).
+//! Time` counter: one row per logical core (the `_Total` instance is skipped).
 
 use windows::core::w;
 

@@ -113,8 +113,9 @@ fn vram_total(uma: bool, dedicated: u64, shared_system: u64) -> u64 {
 
 /// Memory in use by the same rule: dedicated usage for a discrete adapter,
 /// dedicated + shared usage for a UMA one. Shared usage is almost all of a UMA
-/// adapter's figure, so without it the reading is `None`, not a misleading 0;
-/// an unknown dedicated part counts as 0.
+/// adapter's figure (on the Intel adapters measured; an AMD APU may fill its
+/// dedicated carve-out first), so without it the reading is `None`, not a
+/// misleading 0; an unknown dedicated part counts as 0.
 fn vram_used(uma: bool, dedicated: Option<u64>, shared: Option<u64>) -> Option<u64> {
     if !uma {
         return dedicated;
@@ -133,8 +134,10 @@ fn adapter_bytes(samples: &[(String, f64)], luid_key: &str) -> Option<u64> {
 }
 
 /// The "luid_0x<high>_0x<low>" token (lowercase hex, HighPart printed as
-/// unsigned) that PDH puts in the instance names of an adapter's counters,
-/// e.g. "pid_10680_luid_0x00000000_0x000109f8_phys_0_eng_0_engtype_3d".
+/// unsigned) in the instance names of an adapter's counters as `PdhCounter`
+/// returns them, e.g.
+/// "pid_10680_luid_0x00000000_0x000109f8_phys_0_eng_0_engtype_3d". PDH itself
+/// writes the hex digits in upper case; `PdhCounter` lowercases every name.
 fn luid_key(high: i32, low: u32) -> String {
     format!("luid_0x{:08x}_0x{:08x}", high as u32, low)
 }
@@ -272,7 +275,8 @@ impl GpuGroup {
     pub fn refresh(&mut self) {
         self.load.update(&mut self.gpus);
     }
-    /// Append one utilization row per adapter.
+    /// Append one utilization row per adapter, or one "GPU n/a" row when DXGI
+    /// found none (`load_rows`).
     pub fn rows(&self, out: &mut Vec<Row>) {
         load_rows(&self.gpus, out);
     }
@@ -297,8 +301,10 @@ impl VramGroup {
             shared: PdhCounter::new(w!("\\GPU Adapter Memory(*)\\Shared Usage")),
         }
     }
-    /// Read both counters once and update every adapter's usage; a missing
-    /// counter, a failed collect or no instance of the adapter's LUID is n/a.
+    /// Read both counters once and update every adapter's usage (`vram_used`):
+    /// a missing counter, a failed collect or no instance of the adapter's LUID
+    /// is n/a, except that an integrated adapter's unknown dedicated part
+    /// counts as 0, so it shows its shared usage alone.
     pub fn refresh(&mut self) {
         let dedicated = self.dedicated.try_sample().unwrap_or_default();
         let shared = self.shared.try_sample().unwrap_or_default();

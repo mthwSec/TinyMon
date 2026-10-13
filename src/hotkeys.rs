@@ -123,9 +123,10 @@ pub fn blocks_typing(spec: HotkeySpec) -> bool {
     spec.mods & (MOD_CONTROL.0 | MOD_ALT.0 | MOD_WIN.0) == 0 && vk_types_text(spec.vk)
 }
 
-/// Which configured hotkeys failed to register (already taken by another app).
-/// A field is only `true` when that hotkey was requested AND `RegisterHotKey`
-/// failed — so the caller can warn the user about a genuine conflict.
+/// Which configured hotkeys failed to register: almost always because another
+/// app holds the combo, or, in a hand-edited config, because both actions name
+/// the same combo (its second registration fails). A field is only `true` when
+/// that hotkey was requested AND `RegisterHotKey` failed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct RegisterResult {
     pub toggle_failed: bool,

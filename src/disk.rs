@@ -13,8 +13,10 @@ const DISK_CEIL: f64 = 100.0 * 1024.0 * 1024.0;
 pub struct DiskSampler {
     read: PdhCounter,
     write: PdhCounter,
-    /// Bytes per second; `None` when the counter could not be read.
+    /// Read bytes per second; `None` when the counter could not be read or
+    /// reported no `_Total` instance (`total`).
     read_bps: Option<f64>,
+    /// Written bytes per second, by the same rule.
     write_bps: Option<f64>,
 }
 
