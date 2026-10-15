@@ -1,5 +1,7 @@
 # Checks every push to main and every pull request: formatting, lints and
-# tests in both feature sets, with the toolchain that rust-toolchain.toml pins.
+# tests in both feature sets, with the toolchain that rust-toolchain.toml pins,
+# then the release build and its checks, so that a size or privacy regression
+# shows up before a release.
 name: CI
 
 on:
@@ -11,12 +13,13 @@ permissions: {}
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
-    name: fmt, clippy and tests
+    name: fmt, clippy, tests and the release checks
     runs-on: windows-2025
+    timeout-minutes: 30
     permissions:
       contents: read
     defaults:
@@ -48,3 +51,6 @@ jobs:
 
       - name: Tests without default features
         run: cargo test --locked --no-default-features
+
+      - name: Release build and checks
+        run: ./scripts/build-release.ps1 -TargetDir "$env:RUNNER_TEMP/release"
