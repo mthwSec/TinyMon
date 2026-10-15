@@ -20,6 +20,10 @@ fn main() {
     }
     println!("cargo:rerun-if-env-changed=RC");
     if env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
+        println!(
+            "cargo:warning=not an MSVC target: the exe is built without its resources \
+             and with the default C runtime"
+        );
         return;
     }
     // The hybrid C runtime: the Visual C++ runtime (vcruntime with the libcmt
@@ -61,20 +65,35 @@ fn embed_resources() {
             "cargo:warning=rc.exe not found (set RC or install the Windows SDK): \
              the exe is built without its icon, version information and manifest"
         );
+        // Run again once an SDK is installed (a missing path always reruns).
+        println!(r"cargo:rerun-if-changed=C:\Program Files (x86)\Windows Kits\10\bin");
         return;
     };
+    println!("cargo:rerun-if-changed={}", rc.display());
     let res = out.join("tinymon.res");
-    let status = Command::new(&rc)
+    // /l 0x409: US English is the resources' language whatever the build
+    // machine's locale. rc's own output goes to the panic message, not to
+    // stdout, which cargo reads for build-script instructions.
+    let output = Command::new(&rc)
         .current_dir(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"))
         .arg("/nologo")
+        .arg("/l")
+        .arg("0x409")
         .arg("/I")
         .arg(&out)
         .arg("/fo")
         .arg(&res)
         .arg("tinymon.rc")
-        .status()
+        .output()
         .unwrap_or_else(|e| panic!("cannot run {}: {e}", rc.display()));
-    assert!(status.success(), "{} failed on tinymon.rc ({status})", rc.display());
+    assert!(
+        output.status.success(),
+        "{} failed on tinymon.rc ({}):\n{}{}",
+        rc.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
     println!("cargo:rustc-link-arg-bins={}", res.display());
 }
 
@@ -82,7 +101,7 @@ fn embed_resources() {
 /// developer prompt), else the newest one in the Windows 10 SDK's bin folder
 /// for this host.
 fn find_rc() -> Option<PathBuf> {
-    if let Some(rc) = env::var_os("RC") {
+    if let Some(rc) = env::var_os("RC").filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(rc));
     }
     if let Some(path) = env::var_os("PATH") {
