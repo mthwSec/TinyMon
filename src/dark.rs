@@ -6,7 +6,8 @@
 //!   * **Documented** — a dark title bar via `DwmSetWindowAttribute`, a dark
 //!     window background brush, and `WM_CTLCOLOR*` replies that paint label /
 //!     edit text light on dark. This alone covers backgrounds + text.
-//!   * **uxtheme dark mode** — the (undocumented, but stable since Win10 1903)
+//!   * **uxtheme dark mode** — the (undocumented, but stable since Win10 1903,
+//!     and called only from 1809 on: `app_mode_arg`)
 //!     `SetPreferredAppMode` / `AllowDarkModeForWindow` entry points plus
 //!     `SetWindowTheme(.., "DarkMode_Explorer")` ask the common controls to
 //!     render their *chrome* (button faces, check glyphs, the trackbar, scroll
@@ -20,12 +21,14 @@
 use core::cell::Cell;
 use core::ffi::c_void;
 use core::mem::{size_of, transmute};
+use std::sync::OnceLock;
 
-use windows::core::{w, PCSTR, PCWSTR};
+use windows::core::{s, w, PCSTR, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HMODULE, HWND};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{CreateSolidBrush, HBRUSH};
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
+use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows::Win32::UI::Controls::SetWindowTheme;
 
 /// Pack an (R, G, B) triple into a Win32 `COLORREF` (`0x00BBGGRR`). `const` so the
@@ -99,9 +102,51 @@ pub unsafe fn edit_brush() -> HBRUSH {
     cached_brush(&EDIT_BRUSH, EDIT_BG)
 }
 
+/// Ordinal 135: SetPreferredAppMode(PreferredAppMode) from 1903 on,
+/// AllowDarkModeForApp(BOOL) on 1809; both take one 32-bit argument.
 type FnSetPreferredAppMode = unsafe extern "system" fn(i32) -> i32;
 type FnAllowDarkModeForWindow = unsafe extern "system" fn(HWND, i32) -> i32;
 type FnRefresh = unsafe extern "system" fn();
+type FnRtlGetVersion = unsafe extern "system" fn(*mut OSVERSIONINFOW) -> i32;
+
+/// The argument for uxtheme ordinal 135 on Windows build `build`, or None
+/// where the dark-mode ordinals (104, 133 and 135) do not exist: they arrived
+/// in 1809 (17763), and older uxtheme builds hold other exports at those
+/// ordinals. On 1809 ordinal 135 is AllowDarkModeForApp(BOOL), so 1 allows
+/// dark mode; from 1903 (18362) on it is SetPreferredAppMode, and 2 is
+/// ForceDark.
+fn app_mode_arg(build: u32) -> Option<i32> {
+    match build {
+        18362.. => Some(2),
+        17763.. => Some(1),
+        _ => None,
+    }
+}
+
+/// The real Windows build number, read once with ntdll's RtlGetVersion,
+/// which reports the true version whatever the manifest declares; 0 if it
+/// cannot be read.
+fn os_build() -> u32 {
+    static BUILD: OnceLock<u32> = OnceLock::new();
+    *BUILD.get_or_init(|| {
+        // SAFETY: ntdll.dll is loaded in every process; RtlGetVersion fills the
+        // OSVERSIONINFOW whose size field is set and returns an NTSTATUS.
+        unsafe {
+            let Ok(ntdll) = GetModuleHandleW(w!("ntdll.dll")) else { return 0 };
+            let Some(p) = GetProcAddress(ntdll, s!("RtlGetVersion")) else { return 0 };
+            let f: FnRtlGetVersion = transmute(p);
+            let mut info = OSVERSIONINFOW {
+                dwOSVersionInfoSize: size_of::<OSVERSIONINFOW>() as u32,
+                ..Default::default()
+            };
+            if f(&mut info) == 0 {
+                info.dwBuildNumber
+            } else {
+                0
+            }
+        }
+    })
+}
 
 /// uxtheme.dll, which holds the dark-mode entry points; None if it cannot be
 /// loaded.
@@ -113,17 +158,21 @@ unsafe fn uxtheme() -> Option<HMODULE> {
 
 /// Turn on process-wide dark mode so the common controls paint their chrome
 /// dark. Call once at startup, before any settings window is created.
+/// Does nothing before 1809, where the ordinals do not exist (app_mode_arg).
 pub unsafe fn init() {
+    let Some(mode) = app_mode_arg(os_build()) else { return };
     let Some(h) = uxtheme() else { return };
-    // Ordinal 135 = `SetPreferredAppMode(PreferredAppMode)`; 2 == ForceDark.
+    // Ordinal 135 = `SetPreferredAppMode(ForceDark)` from 1903 on,
+    // `AllowDarkModeForApp(TRUE)` on 1809 (app_mode_arg).
     if let Some(p) = GetProcAddress(h, PCSTR(135usize as *const u8)) {
-        // SAFETY: the ordinal resolves to SetPreferredAppMode (uxtheme 1903+).
+        // SAFETY: on the builds app_mode_arg allows (1809+), ordinal 135 is one
+        // of the two functions above, each taking one 32-bit argument.
         let f: FnSetPreferredAppMode = transmute(p);
-        f(2);
+        f(mode);
     }
     // Ordinal 104 = `RefreshImmersiveColorPolicyState()`.
     if let Some(p) = GetProcAddress(h, PCSTR(104usize as *const u8)) {
-        // SAFETY: the ordinal resolves to a no-argument refresh routine.
+        // SAFETY: on 1809+ the ordinal resolves to a no-argument refresh routine.
         let f: FnRefresh = transmute(p);
         f();
     }
@@ -131,10 +180,11 @@ pub unsafe fn init() {
 
 /// Opt a top-level window into dark mode and give it a dark title bar.
 pub unsafe fn apply_window(hwnd: HWND) {
-    if let Some(h) = uxtheme() {
+    let ordinals = app_mode_arg(os_build()).is_some();
+    if let Some(h) = uxtheme().filter(|_| ordinals) {
         // Ordinal 133 = `AllowDarkModeForWindow(HWND, BOOL)`.
         if let Some(p) = GetProcAddress(h, PCSTR(133usize as *const u8)) {
-            // SAFETY: the ordinal resolves to AllowDarkModeForWindow.
+            // SAFETY: on 1809+ the ordinal resolves to AllowDarkModeForWindow.
             let f: FnAllowDarkModeForWindow = transmute(p);
             f(hwnd, 1);
         }
@@ -155,4 +205,34 @@ pub unsafe fn apply_window(hwnd: HWND) {
 pub unsafe fn apply_control(hctrl: HWND) {
     // SAFETY: SetWindowTheme just swaps the visual-style class for this control.
     let _ = SetWindowTheme(hctrl, w!("DarkMode_Explorer"), PCWSTR::null());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{app_mode_arg, os_build};
+
+    /// The uxtheme dark-mode ordinals exist from 1809 (17763) on; ordinal 135
+    /// is AllowDarkModeForApp(BOOL) on 1809 and SetPreferredAppMode from 1903
+    /// (18362) on. Older builds hold other exports at those ordinals.
+    #[test]
+    fn dark_mode_ordinals_follow_the_os_build() {
+        for (build, want) in [
+            (0, None),
+            (15063, None),    // 1703
+            (17134, None),    // 1803
+            (17763, Some(1)), // 1809: AllowDarkModeForApp(TRUE)
+            (18361, Some(1)),
+            (18362, Some(2)), // 1903: SetPreferredAppMode(ForceDark)
+            (19045, Some(2)),
+            (22631, Some(2)),
+        ] {
+            assert_eq!(app_mode_arg(build), want, "build {build}");
+        }
+    }
+
+    /// Reads the live system: the test machine runs Windows 10 or later.
+    #[test]
+    fn os_build_reads_the_real_build() {
+        assert!(os_build() >= 10240, "{}", os_build());
+    }
 }
