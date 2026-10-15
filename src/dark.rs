@@ -181,7 +181,7 @@ pub unsafe fn init() {
 /// Opt a top-level window into dark mode and give it a dark title bar.
 pub unsafe fn apply_window(hwnd: HWND) {
     let ordinals = app_mode_arg(os_build()).is_some();
-    if let Some(h) = uxtheme().filter(|_| ordinals) {
+    if let Some(h) = ordinals.then(|| uxtheme()).flatten() {
         // Ordinal 133 = `AllowDarkModeForWindow(HWND, BOOL)`.
         if let Some(p) = GetProcAddress(h, PCSTR(133usize as *const u8)) {
             // SAFETY: on 1809+ the ordinal resolves to AllowDarkModeForWindow.
