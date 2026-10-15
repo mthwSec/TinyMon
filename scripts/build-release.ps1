@@ -1,0 +1,230 @@
+# Build the TinyMon release exe the way releases are built, then check it.
+#
+#   scripts\build-release.ps1                      build + check (target\release)
+#   scripts\build-release.ps1 -TargetDir D:\t      build into another target dir
+#   scripts\build-release.ps1 -NoDefaultFeatures   the build without Temperature
+#   scripts\build-release.ps1 -CheckOnly x.exe     check an existing exe only
+#
+# The build hides the cargo home (whose path holds the user name) behind
+# /cargo with --remap-path-prefix; build.rs adds everything else (resources,
+# the hybrid C runtime, /Brepro). The checks fail the script when the exe
+# imports the Visual C++ runtime, holds a user or build path, lacks its icon,
+# manifest or version resource, carries another version than Cargo.toml, or
+# is larger than -MaxSize. Exit code 0: built and every check passed.
+param(
+    [string]$CheckOnly,
+    [string]$TargetDir,
+    [switch]$NoDefaultFeatures,
+    [int]$MaxSize = 282624
+)
+$ErrorActionPreference = 'Stop'
+$repo = Split-Path -Parent $PSScriptRoot
+
+function Get-Cargo {
+    $c = Get-Command cargo -ErrorAction SilentlyContinue
+    if ($c) { return $c.Source }
+    $home2 = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+    $p = Join-Path $home2 'bin\cargo.exe'
+    if (Test-Path -LiteralPath $p) { return $p }
+    throw 'cargo not found (neither on PATH nor in the cargo home)'
+}
+
+# ---- PE reading ---------------------------------------------------------------
+
+function U16([byte[]]$b, [int]$o) { [BitConverter]::ToUInt16($b, $o) }
+function U32([byte[]]$b, [int]$o) { [BitConverter]::ToUInt32($b, $o) }
+
+# The sections and data directories of a PE32+ image.
+function Read-Pe([byte[]]$b) {
+    if ((U16 $b 0) -ne 0x5A4D) { throw 'not an MZ image' }
+    $pe = [int](U32 $b 0x3C)
+    if ((U32 $b $pe) -ne 0x4550) { throw 'no PE signature' }
+    $nsec = U16 $b ($pe + 6)
+    $optSize = U16 $b ($pe + 20)
+    $opt = $pe + 24
+    if ((U16 $b $opt) -ne 0x20B) { throw 'not a PE32+ image' }
+    $dirs = @()
+    for ($i = 0; $i -lt 16; $i++) {
+        $dirs += , @((U32 $b ($opt + 112 + 8 * $i)), (U32 $b ($opt + 116 + 8 * $i)))
+    }
+    $secs = @()
+    $s0 = $opt + $optSize
+    for ($i = 0; $i -lt $nsec; $i++) {
+        $o = $s0 + 40 * $i
+        $secs += [pscustomobject]@{
+            Name = [Text.Encoding]::ASCII.GetString($b, $o, 8).TrimEnd([char]0)
+            VSize = U32 $b ($o + 8); VA = U32 $b ($o + 12)
+            RawSize = U32 $b ($o + 16); Raw = U32 $b ($o + 20)
+        }
+    }
+    [pscustomobject]@{ Bytes = $b; Dirs = $dirs; Sections = $secs
+        LinkerVersion = '{0}.{1}' -f $b[$opt + 2], $b[$opt + 3] }
+}
+
+# The file offset of an RVA.
+function Get-Offset($pe, [uint32]$rva) {
+    foreach ($s in $pe.Sections) {
+        $span = [Math]::Max($s.VSize, $s.RawSize)
+        if ($rva -ge $s.VA -and $rva -lt $s.VA + $span) { return [int]($rva - $s.VA + $s.Raw) }
+    }
+    throw ('RVA 0x{0:X} is in no section' -f $rva)
+}
+
+function Read-AsciiZ([byte[]]$b, [int]$o) {
+    $e = $o
+    while ($b[$e] -ne 0) { $e++ }
+    [Text.Encoding]::ASCII.GetString($b, $o, $e - $o)
+}
+
+# The DLL names of the import and delay-import tables.
+function Get-Imports($pe) {
+    $b = $pe.Bytes
+    $names = @()
+    $imp = $pe.Dirs[1]
+    if ($imp[0] -ne 0) {
+        $o = Get-Offset $pe $imp[0]
+        while ((U32 $b ($o + 12)) -ne 0) {
+            $names += Read-AsciiZ $b (Get-Offset $pe (U32 $b ($o + 12)))
+            $o += 20
+        }
+    }
+    $dly = $pe.Dirs[13]
+    if ($dly[0] -ne 0) {
+        $o = Get-Offset $pe $dly[0]
+        while ((U32 $b ($o + 4)) -ne 0) {
+            $names += Read-AsciiZ $b (Get-Offset $pe (U32 $b ($o + 4)))
+            $o += 32
+        }
+    }
+    $names
+}
+
+# The resource tree: type id -> list of name ids, and the version resource bytes.
+function Get-Resources($pe) {
+    $b = $pe.Bytes
+    $rsrc = $pe.Dirs[2]
+    $types = @{}
+    $version = $null
+    if ($rsrc[0] -eq 0) { return [pscustomobject]@{ Types = $types; Version = $version } }
+    $base = Get-Offset $pe $rsrc[0]
+    function Entries([int]$dir) {
+        $n = (U16 $b ($dir + 12)) + (U16 $b ($dir + 14))
+        for ($i = 0; $i -lt $n; $i++) {
+            $e = $dir + 16 + 8 * $i
+            [pscustomobject]@{ Id = U32 $b $e; Off = U32 $b ($e + 4) }
+        }
+    }
+    foreach ($t in (Entries $base)) {
+        if ($t.Id -band 0x80000000) { continue }  # named types: none expected
+        $ids = @()
+        $sub = $base + ($t.Off -band 0x7FFFFFFF)
+        foreach ($nm in (Entries $sub)) {
+            $ids += $nm.Id
+            if ($t.Id -eq 16 -and $null -eq $version) {
+                $lang = (Entries ($base + ($nm.Off -band 0x7FFFFFFF)))[0]
+                $de = $base + $lang.Off
+                $o = Get-Offset $pe (U32 $b $de)
+                $version = $b[$o..($o + (U32 $b ($de + 4)) - 1)]
+            }
+        }
+        $types[[int]$t.Id] = $ids
+    }
+    [pscustomobject]@{ Types = $types; Version = $version }
+}
+
+# ---- checks -------------------------------------------------------------------
+
+function Test-Exe([string]$exe) {
+    $exe = (Resolve-Path -LiteralPath $exe).Path
+    $b = [IO.File]::ReadAllBytes($exe)
+    $pe = Read-Pe $b
+    $fail = @()
+
+    $imports = Get-Imports $pe
+    $crt = @($imports | Where-Object { $_ -match '^(vcruntime|msvcp)\d*(_\d+)?\.dll$' })
+    if ($crt.Count) { $fail += 'imports the Visual C++ runtime: ' + ($crt -join ', ') }
+
+    # Paths, in one-byte text and in UTF-16 at both byte parities. A drive path
+    # needs three more path characters, so that random bytes cannot match.
+    $latin = [Text.Encoding]::GetEncoding(28591).GetString($b)
+    $u16a = [Text.Encoding]::Unicode.GetString($b, 0, $b.Length - ($b.Length % 2))
+    $u16b = [Text.Encoding]::Unicode.GetString($b, 1, ($b.Length - 1) - (($b.Length - 1) % 2))
+    $patterns = [ordered]@{
+        'a drive-letter path' = '[A-Za-z]:\\[\x21-\x7E]{3}'
+        'a \Users\ path' = '\\Users\\'
+        'runneradmin' = 'runneradmin'
+        'the cargo registry path' = '\.cargo\\registry'
+    }
+    if ($env:USERNAME -and $env:USERNAME.Length -ge 4) { $patterns['the user name'] = [regex]::Escape($env:USERNAME) }
+    foreach ($k in $patterns.Keys) {
+        foreach ($text in @($latin, $u16a, $u16b)) {
+            $m = [regex]::Match($text, $patterns[$k], 'IgnoreCase')
+            if ($m.Success) {
+                $ctx = $text.Substring([Math]::Max(0, $m.Index - 8), [Math]::Min(72, $text.Length - [Math]::Max(0, $m.Index - 8)))
+                $fail += ('holds {0}: "{1}"' -f $k, ($ctx -replace '[^\x20-\x7E]', '.'))
+                break
+            }
+        }
+    }
+
+    $res = Get-Resources $pe
+    foreach ($t in @(@(3, 'an icon image'), @(14, 'an icon group'), @(16, 'a version resource'), @(24, 'a manifest'))) {
+        if (-not $res.Types.ContainsKey($t[0])) { $fail += 'lacks ' + $t[1] }
+    }
+    if ($res.Types.ContainsKey(24) -and -not ($res.Types[24] -contains 1)) { $fail += 'its manifest is not resource 1' }
+
+    $want = (Select-String -LiteralPath (Join-Path $repo 'Cargo.toml') -Pattern '^version\s*=\s*"([^"]+)"' |
+        Select-Object -First 1).Matches[0].Groups[1].Value
+    $fileVersion = $null
+    if ($res.Version) {
+        $vtext = [Text.Encoding]::Unicode.GetString([byte[]]$res.Version)
+        $vm = [regex]::Match($vtext, 'FileVersion\x00+([^\x00]+)')
+        if ($vm.Success) { $fileVersion = $vm.Groups[1].Value }
+    }
+    if ($fileVersion -ne $want) { $fail += "FileVersion is '$fileVersion', Cargo.toml says '$want'" }
+
+    $size = $b.Length
+    if ($size -gt $MaxSize) { $fail += "is $size bytes, over the $MaxSize-byte stop" }
+
+    $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLower()
+    Write-Host "exe:      $exe"
+    Write-Host "size:     $size bytes"
+    Write-Host "sha256:   $sha"
+    Write-Host ("imports:  " + (($imports | Sort-Object -Unique) -join ', '))
+    Write-Host "version:  $fileVersion; linker $($pe.LinkerVersion)"
+    if ($fail.Count) {
+        foreach ($f in $fail) { Write-Host "FAIL: the exe $f" }
+        return $false
+    }
+    Write-Host 'PASS: every check passed'
+    return $true
+}
+
+# ---- main ---------------------------------------------------------------------
+
+if ($CheckOnly) {
+    $ok = Test-Exe $CheckOnly
+    exit $(if ($ok) { 0 } else { 1 })
+}
+
+$cargo = Get-Cargo
+$cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+$args2 = @('build', '--release', '--locked')
+if ($TargetDir) { $args2 += @('--target-dir', $TargetDir) }
+if ($NoDefaultFeatures) { $args2 += '--no-default-features' }
+$saved = $env:CARGO_ENCODED_RUSTFLAGS
+$env:CARGO_ENCODED_RUSTFLAGS = "--remap-path-prefix=$cargoHome=/cargo"
+Push-Location $repo
+try {
+    & $cargo @args2
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
+    Write-Host ("rustc:    " + (& (Join-Path (Split-Path $cargo) 'rustc.exe') -V))
+} finally {
+    Pop-Location
+    $env:CARGO_ENCODED_RUSTFLAGS = $saved
+}
+if ($env:VCToolsVersion) { Write-Host "msvc:     $env:VCToolsVersion" }
+if ($env:WindowsSDKVersion) { Write-Host "sdk:      $($env:WindowsSDKVersion.TrimEnd('\'))" }
+$td = if ($TargetDir) { $TargetDir } else { Join-Path $repo 'target' }
+$ok = Test-Exe (Join-Path $td 'release\tinymon.exe')
+exit $(if ($ok) { 0 } else { 1 })
