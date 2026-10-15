@@ -1,0 +1,137 @@
+# Builds a release. On a v* tag the exe is built twice, on two runners from
+# two checkout paths, and published only when both builds have the same
+# bytes. Run by hand (workflow_dispatch), it is a dry run: it builds, checks
+# and packages, keeps the result as a workflow artifact and publishes nothing.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  build:
+    name: build ${{ matrix.copy }}
+    runs-on: windows-2025
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - copy: a
+            dir: tinymon
+          - copy: b
+            dir: second checkout/TinyMon copy
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: ${{ matrix.dir }}
+
+      - name: Install the pinned toolchain
+        working-directory: ${{ matrix.dir }}
+        run: rustup toolchain install
+
+      # The release build and its checks (no Visual C++ runtime import, no
+      # user or build path, resources present, size); see the script.
+      - name: Build and check
+        working-directory: ${{ matrix.dir }}
+        env:
+          COPY: ${{ matrix.copy }}
+        run: |
+          ./scripts/build-release.ps1 -TargetDir "$env:RUNNER_TEMP/target-$env:COPY" -InfoFile "$env:RUNNER_TEMP/BUILDINFO.txt"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/out" | Out-Null
+          Copy-Item "$env:RUNNER_TEMP/target-$env:COPY/release/tinymon.exe", "$env:RUNNER_TEMP/BUILDINFO.txt" "$env:RUNNER_TEMP/out"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-${{ matrix.copy }}
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: windows-2025
+    permissions:
+      contents: write      # create the release
+      id-token: write      # sign the build provenance
+      attestations: write  # store the build provenance
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: built
+
+      - name: Compare the two builds
+        run: |
+          $a = (Get-FileHash built/build-a/tinymon.exe -Algorithm SHA256).Hash
+          $b = (Get-FileHash built/build-b/tinymon.exe -Algorithm SHA256).Hash
+          "build a: $a"
+          "build b: $b"
+          if ($a -ne $b) { throw 'the two builds differ: the exe is not reproducible, nothing is published' }
+
+      - name: Check the tag against Cargo.toml
+        if: github.event_name == 'push'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          if ($env:TAG -ne "v$v") { throw "tag $env:TAG does not match the Cargo.toml version $v" }
+
+      # The zip holds the exe, the README and the licenses, with the commit
+      # time as every file time. SHA256SUMS.txt covers the zip and the exe.
+      - name: Package
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $name = "TinyMon-$v-windows-x64"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $t = [DateTimeOffset]::Parse((git log -1 --format=%cI))
+          Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::Open("$PWD/dist/$name.zip", 'Create')
+          try {
+            foreach ($f in @('built/build-a/tinymon.exe', 'README.md', 'LICENSE-MIT', 'LICENSE-APACHE')) {
+              $e = $zip.CreateEntry("$name/$(Split-Path -Leaf $f)", 'Optimal')
+              $e.LastWriteTime = $t
+              $out = $e.Open()
+              $in = [IO.File]::OpenRead("$PWD/$f")
+              try { $in.CopyTo($out) } finally { $in.Dispose(); $out.Dispose() }
+            }
+          } finally { $zip.Dispose() }
+          Copy-Item built/build-a/BUILDINFO.txt dist/BUILDINFO.txt
+          $sums = foreach ($f in @("dist/$name.zip", 'built/build-a/tinymon.exe')) {
+            '{0}  {1}' -f (Get-FileHash $f -Algorithm SHA256).Hash.ToLower(), (Split-Path -Leaf $f)
+          }
+          [IO.File]::WriteAllText("$PWD/dist/SHA256SUMS.txt", (($sums -join "`n") + "`n"))
+          Get-Content dist/SHA256SUMS.txt
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: github.event_name == 'push' && !github.event.repository.private
+        with:
+          subject-path: dist/*
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+      - name: Publish the release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          $files = (Get-ChildItem dist).FullName
+          gh release create $env:TAG @files --verify-tag --title "TinyMon $env:TAG" --generate-notes
