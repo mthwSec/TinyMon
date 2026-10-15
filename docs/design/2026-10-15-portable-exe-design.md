@@ -160,3 +160,18 @@ The baseline is 258,560 B. The expected size is about 280,064 B, plus a few hund
   - `scripts/build-release.ps1 -InfoFile` writes the report, which the release publishes as `BUILDINFO.txt` (rustc, MSVC toolset, SDK). It names the exe by its file name only, so no build path reaches it.
   - The release zip is written entry by entry: forward-slash paths, a fixed order, and the commit time on every entry.
 - The workflows pass actionlint 1.7.12 with no error. Their first run comes with SP4.
+- Review fixes, after an independent review of the branch:
+  - The script checks the executable that cargo's JSON messages name, built into an absolute `--target-dir`.
+  - The user name counts only between path separators, and the machine name only as a whole word. The C runtime and path checks are wider.
+  - The script picks `rc.exe` itself and hands it to the build through `RC`.
+  - `build.rs` pins `/l 0x409` and reruns when an SDK appears.
+  - `dark.rs` loads uxtheme only on builds that have the ordinals.
+  - The release workflow:
+    - packages in a read-only job;
+    - publishes from a tag-only job that alone holds write permissions;
+    - attests the exe as well as the assets;
+    - has `SHA256SUMS.txt` cover the zip and `BUILDINFO.txt`, with the exe's SHA-256 in `BUILDINFO.txt`.
+  - CI also runs the release checks.
+- Differences from section 3.3:
+  - Provenance uses `actions/attest-build-provenance` (v4.2.2), the wrapper around `actions/attest`.
+  - The zip is reproducible only on the same .NET deflate implementation; a new PowerShell on the runner image can change its bytes, but not the exe's.

@@ -389,12 +389,14 @@ Windows DLL, and passes `/Brepro`, so that the same inputs give the same bytes.
 
 ## Releases
 
-A release exe is built with the script that the release workflow runs:
+A release exe is built with the script that the release workflow runs. Windows
+blocks unsigned scripts by default, so run it through `powershell
+-ExecutionPolicy Bypass -File` (or `pwsh -File`):
 
 ```powershell
-scripts\build-release.ps1                      # build into target\release, then check
-scripts\build-release.ps1 -NoDefaultFeatures   # without the Temperature metric
-scripts\build-release.ps1 -CheckOnly path\to\tinymon.exe
+powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1   # build into target\release, then check
+powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1 -NoDefaultFeatures
+powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1 -CheckOnly path\to\tinymon.exe
 ```
 
 It hides the cargo home (whose path contains your user name) behind `/cargo`,
@@ -410,14 +412,19 @@ and is published only if both builds have the same bytes. A release holds:
 
 - `TinyMon-<version>-windows-x64.zip`: `tinymon.exe`, this README and the two
   license files;
-- `SHA256SUMS.txt`: the SHA-256 of the zip and of `tinymon.exe`;
-- `BUILDINFO.txt`: the tool versions the build used.
+- `BUILDINFO.txt`: the SHA-256 of `tinymon.exe` and the tool versions the
+  build used;
+- `SHA256SUMS.txt`: the SHA-256 of the zip and of `BUILDINFO.txt`.
 
-To verify a download, compare `Get-FileHash <file>` with `SHA256SUMS.txt`. If
-the GitHub CLI is installed, `gh attestation verify <file> --repo
-mthwSec/TinyMon` checks that the file was built by this repository's release
-workflow. The same source built with the tools in `BUILDINFO.txt` gives the
-same `tinymon.exe`, byte for byte, whatever the user name or folder.
+To verify a download, compare `Get-FileHash <file>` with `SHA256SUMS.txt`
+(`sha256sum -c SHA256SUMS.txt` in a folder with both files), and the extracted
+`tinymon.exe` with the `sha256:` line of `BUILDINFO.txt`. If the GitHub CLI is
+installed, `gh attestation verify <file> --repo mthwSec/TinyMon` checks that
+the zip, or the exe from it, was built by this repository's release workflow.
+The same source built with `scripts\build-release.ps1` and the tools in
+`BUILDINFO.txt` gives the same `tinymon.exe`, byte for byte, whatever the user
+name or folder (a plain `cargo build` embeds the cargo home's path and gives
+other bytes).
 
 The exe is not code-signed, so on a first run Windows SmartScreen may show
 "Windows protected your PC". Choose **More info**, then **Run anyway**.
@@ -455,7 +462,8 @@ LICENSE-APACHE      the Apache License 2.0
 scripts/
   build-release.ps1 the release build and its checks
 .github/workflows/
-  ci.yml            fmt, clippy and tests on every push and pull request
+  ci.yml            fmt, clippy, tests and the release checks on every push
+                    to main and every pull request
   release.yml       the reproducible release build on a version tag
 docs/design/        the designs of the correctness pass and the portable exe
 prompt.txt          the original build brief
