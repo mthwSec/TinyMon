@@ -1,0 +1,45 @@
+// TinyMon's resources: the icon, the application manifest and the version
+// information. build.rs compiles this file with the Windows SDK resource
+// compiler and links the result into the exe. The version numbers come from
+// Cargo.toml through version.h, which build.rs writes. The strings are listed
+// in a fixed order, so that two builds give the same bytes.
+#pragma code_page(65001)
+#include "version.h"
+
+1 ICON "icon.ico"
+
+// RT_MANIFEST #1: asInvoker, the Windows 10/11 supportedOS GUID and
+// Per-Monitor-V2 DPI awareness. Left out on purpose: assemblyIdentity (a
+// malformed one stops the exe from starting, and its version would drift from
+// Cargo.toml), activeCodePage (no ANSI APIs are used) and the Common Controls
+// 6.0 dependency (the settings window is owner-drawn for comctl32 5.82).
+1 24 "tinymon.manifest"
+
+1 VERSIONINFO
+FILEVERSION TM_VER_MAJOR, TM_VER_MINOR, TM_VER_PATCH, 0
+PRODUCTVERSION TM_VER_MAJOR, TM_VER_MINOR, TM_VER_PATCH, 0
+FILEFLAGSMASK 0x3f
+FILEFLAGS 0x0
+FILEOS 0x40004
+FILETYPE 0x1
+FILESUBTYPE 0x0
+{
+    BLOCK "StringFileInfo"
+    {
+        BLOCK "000004b0"
+        {
+            VALUE "Comments", "https://github.com/mthwSec/TinyMon"
+            VALUE "CompanyName", "mthwSec"
+            VALUE "FileDescription", "Tiny always-on-top Windows resource monitor"
+            VALUE "FileVersion", TM_VER_STR
+            VALUE "LegalCopyright", "Copyright (C) 2026 mthwSec"
+            VALUE "OriginalFilename", "tinymon.exe"
+            VALUE "ProductName", "TinyMon"
+            VALUE "ProductVersion", TM_VER_STR
+        }
+    }
+    BLOCK "VarFileInfo"
+    {
+        VALUE "Translation", 0x0, 0x04b0
+    }
+}

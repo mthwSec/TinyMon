@@ -22,11 +22,6 @@ strip = true        # strip symbols from the final executable
 default = ["temp"]
 temp = []
 
-[build-dependencies]
-# Build-time only (not in the runtime binary): embeds the app icon, Windows
-# file details (version info) and the application manifest (tinymon.manifest)
-# into the .exe via the SDK resource compiler.
-winres = "0.1"
 
 [dependencies]
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Registry", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_Performance", "Win32_System_Power", "Win32_UI_Controls", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Security"] }

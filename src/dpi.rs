@@ -103,10 +103,10 @@ mod tests {
         assert_eq!(Scale(192).px(200), 400); // 400.0
     }
 
-    /// build.rs embeds `tinymon.manifest` as RT_MANIFEST #1 next to the version
-    /// info and the icon, and winres links those resources into the test binary
-    /// too. A build without the resource compiler has no RT_VERSION #1 either;
-    /// then there is nothing to check.
+    /// build.rs compiles tinymon.rc, which embeds `tinymon.manifest` as
+    /// RT_MANIFEST #1 next to the version info and the icon, and links those
+    /// resources into the test binary too. A build without the resource
+    /// compiler fails here instead of shipping an exe without them.
     #[test]
     fn exe_embeds_minimal_manifest() {
         use windows::core::PCWSTR;
@@ -118,9 +118,7 @@ mod tests {
         // SAFETY: looks up resources of this executable (module None); resource
         // data stays mapped for the life of the process and is only read here.
         unsafe {
-            if FindResourceW(None, id1, RT_VERSION).is_invalid() {
-                return;
-            }
+            assert!(!FindResourceW(None, id1, RT_VERSION).is_invalid(), "no RT_VERSION #1");
             let res = FindResourceW(None, id1, RT_MANIFEST);
             assert!(!res.is_invalid(), "no RT_MANIFEST #1 resource");
             let data = LoadResource(None, res).expect("LoadResource");
