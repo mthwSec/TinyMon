@@ -1,4 +1,5 @@
-//! Build script: compile `tinymon.rc` (the application icon, the Windows
+//! Build script: link the exe with the hybrid C runtime and /Brepro (see
+//! `main`), and compile `tinymon.rc` (the application icon, the Windows
 //! version information and the application manifest `tinymon.manifest`) with
 //! the Windows SDK resource compiler and link the result into the exe. The
 //! version numbers come from Cargo.toml through `OUT_DIR/version.h`. Runs only
@@ -20,6 +21,22 @@ fn main() {
     println!("cargo:rerun-if-env-changed=RC");
     if env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
         return;
+    }
+    // The hybrid C runtime: the Visual C++ runtime (vcruntime with the libcmt
+    // startup code) is linked in, and the Universal CRT, which ships with
+    // Windows 10, stays a DLL; so the exe needs no Visual C++ redistributable.
+    // /Brepro replaces the link time stamp and the random debug-record GUID
+    // with hashes of the content, so that the same inputs give the same bytes.
+    // Here and not in .cargo/config.toml, so that a RUSTFLAGS variable cannot
+    // drop them.
+    for arg in [
+        "/NODEFAULTLIB:msvcrt.lib",
+        "/DEFAULTLIB:libcmt.lib",
+        "/NODEFAULTLIB:libucrt.lib",
+        "/DEFAULTLIB:ucrt.lib",
+        "/Brepro",
+    ] {
+        println!("cargo:rustc-link-arg-bins={arg}");
     }
     embed_resources();
 }
