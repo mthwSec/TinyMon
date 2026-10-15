@@ -1,5 +1,7 @@
 # Build the TinyMon release exe the way releases are built, then check it.
 #
+#   powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1 ...
+#
 #   scripts\build-release.ps1                      build + check (target\release)
 #   scripts\build-release.ps1 -TargetDir D:\t      build into another target dir
 #   scripts\build-release.ps1 -NoDefaultFeatures   the build without Temperature
@@ -24,6 +26,15 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $report = New-Object System.Collections.Generic.List[string]
+$msvc = $null
+$linker = $null
+
+# Paths from the command line, made absolute against the current location
+# (cargo runs in the repository, .NET in the process's start folder).
+function Get-FullPath([string]$p) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($p) }
+if ($CheckOnly) { $CheckOnly = Get-FullPath $CheckOnly }
+if ($TargetDir) { $TargetDir = Get-FullPath $TargetDir }
+if ($InfoFile) { $InfoFile = Get-FullPath $InfoFile }
 
 # Print a report line and keep it for -InfoFile.
 function Say([string]$line) {
@@ -31,25 +42,45 @@ function Say([string]$line) {
     $report.Add($line)
 }
 
-# The MSVC toolset (from vswhere) and the newest Windows 10 SDK with rc.exe,
-# the ones the build finds when no developer prompt or RC variable is set.
-function Get-Toolset {
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if (Test-Path -LiteralPath $vswhere) {
-        $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-        if ($vs) {
-            $txt = Join-Path $vs 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt'
-            if (Test-Path -LiteralPath $txt) { Say ('msvc:     ' + (Get-Content -LiteralPath $txt -TotalCount 1).Trim()) }
+# The resource compiler the build uses: RC if set, else rc.exe on PATH, else
+# the newest one in the Windows 10 SDK (the order build.rs follows). The
+# build gets it through RC, so the SDK reported is the one used.
+function Select-Rc {
+    if ($env:RC) {
+        Say 'sdk:      the RC variable names the resource compiler'
+        return
+    }
+    $onPath = Get-Command rc.exe -ErrorAction SilentlyContinue
+    if ($onPath) {
+        $rc = $onPath.Source
+    } else {
+        $root = $null
+        foreach ($key in 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows Kits\Installed Roots',
+                         'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots') {
+            if (-not $root) { $root = (Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue).KitsRoot10 }
         }
+        if (-not $root) { $root = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10' }
+        $dir = Get-ChildItem -LiteralPath (Join-Path $root 'bin') -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d+(\.\d+)+$' -and (Test-Path -LiteralPath (Join-Path $_.FullName 'x64\rc.exe')) } |
+            Sort-Object { [version]$_.Name } | Select-Object -Last 1
+        if (-not $dir) { throw 'rc.exe not found: install a Windows 10/11 SDK or set RC' }
+        $rc = Join-Path $dir.FullName 'x64\rc.exe'
     }
-    $kits = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
-    if (Test-Path -LiteralPath $kits) {
-        $sdk = Get-ChildItem -LiteralPath $kits -Directory | Where-Object {
-            $_.Name -match '^\d+(\.\d+)+$' -and (Test-Path -LiteralPath (Join-Path $_.FullName 'x64\rc.exe'))
-        } | Sort-Object { [version]$_.Name } | Select-Object -Last 1
-        if ($sdk) { Say "sdk:      $($sdk.Name)" }
-    }
-    if ($env:RC) { Say "rc:       $env:RC (RC)" }
+    $env:RC = $rc
+    $sdk = if ($rc -match '\\bin\\(\d+(\.\d+)+)\\') { $Matches[1] } else { 'unknown' }
+    Say "sdk:      $sdk"
+}
+
+# The MSVC toolset: a developer prompt's, else the newest Visual Studio's (vswhere).
+function Get-Msvc {
+    if ($env:VCToolsVersion) { return $env:VCToolsVersion.TrimEnd('\') }
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (-not (Test-Path -LiteralPath $vswhere)) { return $null }
+    $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    if (-not $vs) { return $null }
+    $txt = Join-Path $vs 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt'
+    if (Test-Path -LiteralPath $txt) { return (Get-Content -LiteralPath $txt -TotalCount 1).Trim() }
+    $null
 }
 
 function Get-Cargo {
@@ -173,21 +204,28 @@ function Test-Exe([string]$exe) {
     $fail = @()
 
     $imports = Get-Imports $pe
-    $crt = @($imports | Where-Object { $_ -match '^(vcruntime|msvcp)\d*(_\d+)?\.dll$' })
+    $crt = @($imports | Where-Object { $_ -match '^(vcruntime|msvcp|msvcr|concrt|vcomp|ucrtbased)' })
     if ($crt.Count) { $fail += 'imports the Visual C++ runtime: ' + ($crt -join ', ') }
 
     # Paths, in one-byte text and in UTF-16 at both byte parities. A drive path
-    # needs three more path characters, so that random bytes cannot match.
+    # needs three more path characters, so that random bytes cannot match. The
+    # user name counts only between path separators ("User" is also a word in
+    # std's messages), the machine name only as a whole word.
     $latin = [Text.Encoding]::GetEncoding(28591).GetString($b)
     $u16a = [Text.Encoding]::Unicode.GetString($b, 0, $b.Length - ($b.Length % 2))
     $u16b = [Text.Encoding]::Unicode.GetString($b, 1, ($b.Length - 1) - (($b.Length - 1) % 2))
     $patterns = [ordered]@{
-        'a drive-letter path' = '[A-Za-z]:\\[\x21-\x7E]{3}'
-        'a \Users\ path' = '\\Users\\'
+        'a drive-letter path' = '(?<![A-Za-z0-9])[A-Za-z]:[\\/](?![\\/])[\x21-\x7E]{3}'
+        'a \Users\ path' = '[\\/]Users[\\/]'
         'runneradmin' = 'runneradmin'
-        'the cargo registry path' = '\.cargo\\registry'
+        'the cargo registry path' = '\.cargo[\\/]registry'
     }
-    if ($env:USERNAME -and $env:USERNAME.Length -ge 4) { $patterns['the user name'] = [regex]::Escape($env:USERNAME) }
+    if ($env:USERNAME) {
+        $patterns['the user name in a path'] = '(?<=[\\/])' + [regex]::Escape($env:USERNAME) + '(?=[\\/])'
+    }
+    if ($env:COMPUTERNAME -and $env:COMPUTERNAME.Length -ge 6) {
+        $patterns['the machine name'] = '(?<![A-Za-z0-9-])' + [regex]::Escape($env:COMPUTERNAME) + '(?![A-Za-z0-9-])'
+    }
     foreach ($k in $patterns.Keys) {
         foreach ($text in @($latin, $u16a, $u16b)) {
             $m = [regex]::Match($text, $patterns[$k], 'IgnoreCase')
@@ -204,6 +242,7 @@ function Test-Exe([string]$exe) {
         if (-not $res.Types.ContainsKey($t[0])) { $fail += 'lacks ' + $t[1] }
     }
     if ($res.Types.ContainsKey(24) -and -not ($res.Types[24] -contains 1)) { $fail += 'its manifest is not resource 1' }
+    if ($res.Types.ContainsKey(14) -and -not ($res.Types[14] -contains 1)) { $fail += 'its icon group is not resource 1' }
 
     $want = (Select-String -LiteralPath (Join-Path $repo 'Cargo.toml') -Pattern '^version\s*=\s*"([^"]+)"' |
         Select-Object -First 1).Matches[0].Groups[1].Value
@@ -225,6 +264,7 @@ function Test-Exe([string]$exe) {
     Say "sha256:   $sha"
     Say ("imports:  " + (($imports | Sort-Object -Unique) -join ', '))
     Say "version:  $fileVersion; linker $($pe.LinkerVersion)"
+    $script:linker = $pe.LinkerVersion
     if ($fail.Count) {
         foreach ($f in $fail) { Say "FAIL: the exe $f" }
         return $false
@@ -247,28 +287,39 @@ if ($CheckOnly) {
 
 $cargo = Get-Cargo
 $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
-$args2 = @('build', '--release', '--locked')
-if ($TargetDir) { $args2 += @('--target-dir', $TargetDir) }
+$td = if ($TargetDir) { $TargetDir } else { Join-Path $repo 'target' }
+$args2 = @('build', '--release', '--locked', '--target-dir', $td, '--message-format=json-render-diagnostics')
 if ($NoDefaultFeatures) { $args2 += '--no-default-features' }
-$saved = $env:CARGO_ENCODED_RUSTFLAGS
+if ($env:RUSTFLAGS) { Write-Host 'note: RUSTFLAGS is set; the release build ignores it' }
+$savedFlags = $env:CARGO_ENCODED_RUSTFLAGS
+$savedRc = $env:RC
 $env:CARGO_ENCODED_RUSTFLAGS = "--remap-path-prefix=$cargoHome=/cargo"
+$exe = $null
 Push-Location $repo
 try {
-    & $cargo @args2
-    if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
     Say ("rustc:    " + (& (Join-Path (Split-Path $cargo) 'rustc.exe') -V))
+    $msvc = Get-Msvc
+    if ($msvc) { Say "msvc:     $msvc" }
+    Select-Rc
+    # Diagnostics go to the console; stdout carries cargo's JSON messages,
+    # whose compiler-artifact line names the exe that was built.
+    $messages = & $cargo @args2
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
+    foreach ($line in $messages) {
+        if ($line -like '{"reason":"compiler-artifact"*') {
+            $m = $line | ConvertFrom-Json
+            if ($m.executable -and $m.target.name -eq 'tinymon') { $exe = $m.executable }
+        }
+    }
 } finally {
     Pop-Location
-    $env:CARGO_ENCODED_RUSTFLAGS = $saved
+    $env:CARGO_ENCODED_RUSTFLAGS = $savedFlags
+    $env:RC = $savedRc
 }
-if ($env:VCToolsVersion) {
-    # A developer prompt: its toolset and SDK are the ones used.
-    Say "msvc:     $env:VCToolsVersion"
-    if ($env:WindowsSDKVersion) { Say "sdk:      $($env:WindowsSDKVersion.TrimEnd('\'))" }
-} else {
-    Get-Toolset
+if (-not $exe) { throw 'cargo reported no tinymon executable' }
+$ok = Test-Exe $exe
+if ($msvc -and $linker -and -not $msvc.StartsWith("$linker.")) {
+    Say "note: the exe's linker is $linker, not the reported toolset $msvc"
 }
-$td = if ($TargetDir) { $TargetDir } else { Join-Path $repo 'target' }
-$ok = Test-Exe (Join-Path $td 'release\tinymon.exe')
 Write-Info
 exit $(if ($ok) { 0 } else { 1 })
