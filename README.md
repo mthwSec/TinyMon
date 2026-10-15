@@ -2,9 +2,9 @@
 
 A tiny always-on-top Windows resource monitor, written in pure Rust and Win32:
 no Electron, no webview, no .NET, no scripting runtime. One small `.exe`
-(about 252 KiB) shows the metrics you pick in a borderless, semi-transparent
-widget, with a tray icon, two optional global hotkeys and a native settings
-window with a live preview.
+(about 274 KiB, nothing to install) shows the metrics you pick in a
+borderless, semi-transparent widget, with a tray icon, two optional global
+hotkeys and a native settings window with a live preview.
 
 ```text
 +------------------------------+
@@ -346,20 +346,23 @@ To run:
   bound at load time, so an older Windows refuses to start the exe. The GPU
   memory rows need version 1709 (`n/a` before), and the settings window's dark
   title bar needs version 2004 (before that it keeps a light one).
-- The Visual C++ runtime, `VCRUNTIME140.dll` (the Microsoft Visual C++
-  2015-2022 Redistributable, x64), which most Windows 10 and 11 machines
-  already have; the rest of the C runtime is part of Windows 10.
+- Nothing else to install. The Visual C++ runtime is linked into the exe, and
+  the rest of the C runtime (the Universal CRT) is part of Windows 10, so no
+  Visual C++ Redistributable is needed.
 - No admin rights, no services or drivers, no network access. The exe declares
   `asInvoker` in its manifest.
 
 To build:
 
-- **Rust** (stable) with the **MSVC** toolchain (`x86_64-pc-windows-msvc`).
+- **Rust 1.96.0** with the **MSVC** toolchain (`x86_64-pc-windows-msvc`).
+  `rust-toolchain.toml` pins that version, and rustup installs it on first use.
 - **Visual Studio Build Tools** (the "Desktop development with C++" workload,
-  for `link.exe`) and a **Windows 10/11 SDK**, whose resource compiler embeds
-  the icon, the version information and the manifest. Without it the build
-  still succeeds with a warning, and the exe has none of the three (it still
-  turns on Per-Monitor-V2 DPI awareness itself).
+  for `link.exe` and the static Visual C++ runtime) and a **Windows 10/11 SDK**,
+  whose resource compiler (`rc.exe`) builds `tinymon.rc`: the icon, the version
+  information and the manifest. `build.rs` takes the `RC` environment variable,
+  else `rc.exe` on `PATH`, else the newest one in the SDK. Without it the build
+  still succeeds with a warning, but the exe has none of the three, and both
+  the test `exe_embeds_minimal_manifest` and the release script fail.
 
 `cargo` finds the MSVC linker by itself; no developer command prompt is needed.
 
@@ -372,19 +375,58 @@ cargo build --release --no-default-features  # without it
 
 The exe is `target\release\tinymon.exe`. Copy it anywhere and run it.
 
-Sizes with Rust 1.96: **258,560 bytes** (252.5 KiB) for the default build and
-255,488 bytes without default features. The release profile optimises for size
-(`opt-level = "z"`, LTO, one codegen unit, `panic = "abort"`, stripped).
+Sizes with Rust 1.96 and MSVC 14.51: **280,576 bytes** (274 KiB) for the
+default build and 278,016 bytes without default features. The release profile
+optimises for size (`opt-level = "z"`, LTO, one codegen unit,
+`panic = "abort"`, stripped).
 
-`build.rs` embeds `icon.ico` (icon resource 1, also the settings window's
-caption icon), the version information and `tinymon.manifest`: run as the
-invoking user (`asInvoker`), Windows 10 and 11, Per-Monitor-V2 DPI awareness.
+`build.rs` compiles `tinymon.rc`, which embeds `icon.ico` (icon resource 1,
+also the settings window's caption icon), the version information (its
+numbers come from `Cargo.toml`) and `tinymon.manifest`: run as the invoking
+user (`asInvoker`), Windows 10 and 11, Per-Monitor-V2 DPI awareness. It also
+links the Visual C++ runtime statically while the Universal CRT stays a
+Windows DLL, and passes `/Brepro`, so that the same inputs give the same bytes.
+
+## Releases
+
+A release exe is built with the script that the release workflow runs:
+
+```powershell
+scripts\build-release.ps1                      # build into target\release, then check
+scripts\build-release.ps1 -NoDefaultFeatures   # without the Temperature metric
+scripts\build-release.ps1 -CheckOnly path\to\tinymon.exe
+```
+
+It hides the cargo home (whose path contains your user name) behind `/cargo`,
+builds, and then fails if the exe imports the Visual C++ runtime, contains a
+user or build path, lacks its icon, version information or manifest, carries
+another version than `Cargo.toml`, or is larger than 282,624 bytes. It prints
+the size, the SHA-256 and the tools used (rustc, the MSVC toolset, the
+Windows SDK).
+
+Releases are built by GitHub Actions (`.github/workflows/release.yml`) on a
+version tag: the exe is built twice, on two runners from two checkout paths,
+and is published only if both builds have the same bytes. A release holds:
+
+- `TinyMon-<version>-windows-x64.zip`: `tinymon.exe`, this README and the two
+  license files;
+- `SHA256SUMS.txt`: the SHA-256 of the zip and of `tinymon.exe`;
+- `BUILDINFO.txt`: the tool versions the build used.
+
+To verify a download, compare `Get-FileHash <file>` with `SHA256SUMS.txt`. If
+the GitHub CLI is installed, `gh attestation verify <file> --repo
+mthwSec/TinyMon` checks that the file was built by this repository's release
+workflow. The same source built with the tools in `BUILDINFO.txt` gives the
+same `tinymon.exe`, byte for byte, whatever the user name or folder.
+
+The exe is not code-signed, so on a first run Windows SmartScreen may show
+"Windows protected your PC". Choose **More info**, then **Run anyway**.
 
 ## Tests
 
 ```sh
-cargo test                          # 227 tests, 2 diagnostics ignored
-cargo test --no-default-features    # 215 tests, 2 diagnostics ignored
+cargo test                          # 232 tests, 2 diagnostics ignored
+cargo test --no-default-features    # 220 tests, 2 diagnostics ignored
 cargo test -- --ignored --nocapture dump_   # print the detected GPUs and GPU engines
 ```
 
@@ -401,12 +443,21 @@ under `%TEMP%` (`tinymon_test_*`), so run one test suite at a time on a machine.
 ## Project structure
 
 ```text
-build.rs            embeds icon.ico, the version information and tinymon.manifest
+build.rs            compiles tinymon.rc; links the static VC++ runtime and /Brepro
+tinymon.rc          the resources: icon, manifest, version information
 tinymon.manifest    asInvoker, Windows 10/11, Per-Monitor-V2
 icon.ico            the exe's icon (resource 1)
+rust-toolchain.toml pins Rust 1.96.0
 rustfmt.toml        use_small_heuristics = "Max"
 .gitattributes      LF line endings; icon.ico is binary
-docs/design/        the design of the correctness pass
+LICENSE-MIT         the MIT license
+LICENSE-APACHE      the Apache License 2.0
+scripts/
+  build-release.ps1 the release build and its checks
+.github/workflows/
+  ci.yml            fmt, clippy and tests on every push and pull request
+  release.yml       the reproducible release build on a version tag
+docs/design/        the designs of the correctness pass and the portable exe
 prompt.txt          the original build brief
 src/
   main.rs           the widget: window, message loop, paint, tray icon and menu,
@@ -472,11 +523,12 @@ this for distribution.
 ## Implementation notes
 
 - Pure Rust and the [`windows`](https://crates.io/crates/windows) crate
-  (0.62.2), the only runtime dependency, with only the crate features TinyMon
-  uses; `winres` is a build-time dependency for the resources.
+  (0.62.2), the only dependency, with only the crate features TinyMon uses.
+  The build script uses std only: it runs the SDK's resource compiler itself.
 - One UI thread, no worker threads. A metric that is off is never built.
 - Every `unsafe` block carries a `SAFETY` comment on the Win32 call it makes.
 
 ## License
 
-MIT OR Apache-2.0
+Licensed under either of the [Apache License, Version 2.0](LICENSE-APACHE) or
+the [MIT license](LICENSE-MIT), at your option.

@@ -139,3 +139,24 @@ The baseline is 258,560 B. The expected size is about 280,064 B, plus a few hund
   4. Start it with `explorer.exe`.
   5. Verify the result, including the registry values.
 - Risk: Defender may flag a new binary layout as a false positive. That is observed, not predicted. Code signing is the only real fix, and it comes after SP4.
+
+## 6. As built (2026-10-15)
+
+- Commits on `sp2-portable`, after this document:
+  1. the toolchain pin;
+  2. the release script;
+  3. `tinymon.rc` in place of winres;
+  4. the hybrid CRT with `/Brepro`;
+  5. the dark-mode guard;
+  6. the license files;
+  7. the tool versions in the release report;
+  8. the workflows;
+  9. the docs.
+- Release exe: 280,576 B (278,016 B without default features). That is +22,016 B over 258,560 B, and 2,048 B under the stop. The hybrid CRT accounts for 21,504 B and the dark-mode guard for 512 B.
+- Tests: 232 passed with 2 ignored, and 220 with 2 without default features. `Cargo.lock` holds 16 packages.
+- Reproducibility: the release exe was built from three source paths: the repository, a second folder, and a deeper path containing spaces. All three gave the same SHA-256. `scripts/build-release.ps1` passes every check in both feature sets. Two packaging runs gave the same zip.
+- Additions within the design:
+  - `dpi::tests::exe_embeds_minimal_manifest` now requires the version resource instead of skipping, so a build without `rc.exe` fails the tests.
+  - `scripts/build-release.ps1 -InfoFile` writes the report, which the release publishes as `BUILDINFO.txt` (rustc, MSVC toolset, SDK). It names the exe by its file name only, so no build path reaches it.
+  - The release zip is written entry by entry: forward-slash paths, a fixed order, and the commit time on every entry.
+- The workflows pass actionlint 1.7.12 with no error. Their first run comes with SP4.
