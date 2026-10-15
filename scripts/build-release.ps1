@@ -4,21 +4,53 @@
 #   scripts\build-release.ps1 -TargetDir D:\t      build into another target dir
 #   scripts\build-release.ps1 -NoDefaultFeatures   the build without Temperature
 #   scripts\build-release.ps1 -CheckOnly x.exe     check an existing exe only
+#   scripts\build-release.ps1 -InfoFile b.txt      also write the report to a file
 #
 # The build hides the cargo home (whose path holds the user name) behind
 # /cargo with --remap-path-prefix; build.rs adds everything else (resources,
 # the hybrid C runtime, /Brepro). The checks fail the script when the exe
 # imports the Visual C++ runtime, holds a user or build path, lacks its icon,
 # manifest or version resource, carries another version than Cargo.toml, or
-# is larger than -MaxSize. Exit code 0: built and every check passed.
+# is larger than -MaxSize. The report names the tools (rustc, the MSVC
+# toolset, the Windows SDK) that a rebuild needs to give the same bytes.
+# Exit code 0: built and every check passed.
 param(
     [string]$CheckOnly,
     [string]$TargetDir,
     [switch]$NoDefaultFeatures,
-    [int]$MaxSize = 282624
+    [int]$MaxSize = 282624,
+    [string]$InfoFile
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+$report = New-Object System.Collections.Generic.List[string]
+
+# Print a report line and keep it for -InfoFile.
+function Say([string]$line) {
+    Write-Host $line
+    $report.Add($line)
+}
+
+# The MSVC toolset (from vswhere) and the newest Windows 10 SDK with rc.exe,
+# the ones the build finds when no developer prompt or RC variable is set.
+function Get-Toolset {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (Test-Path -LiteralPath $vswhere) {
+        $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if ($vs) {
+            $txt = Join-Path $vs 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt'
+            if (Test-Path -LiteralPath $txt) { Say ('msvc:     ' + (Get-Content -LiteralPath $txt -TotalCount 1).Trim()) }
+        }
+    }
+    $kits = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+    if (Test-Path -LiteralPath $kits) {
+        $sdk = Get-ChildItem -LiteralPath $kits -Directory | Where-Object {
+            $_.Name -match '^\d+(\.\d+)+$' -and (Test-Path -LiteralPath (Join-Path $_.FullName 'x64\rc.exe'))
+        } | Sort-Object { [version]$_.Name } | Select-Object -Last 1
+        if ($sdk) { Say "sdk:      $($sdk.Name)" }
+    }
+    if ($env:RC) { Say "rc:       $env:RC (RC)" }
+}
 
 function Get-Cargo {
     $c = Get-Command cargo -ErrorAction SilentlyContinue
@@ -187,23 +219,29 @@ function Test-Exe([string]$exe) {
     if ($size -gt $MaxSize) { $fail += "is $size bytes, over the $MaxSize-byte stop" }
 
     $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLower()
-    Write-Host "exe:      $exe"
-    Write-Host "size:     $size bytes"
-    Write-Host "sha256:   $sha"
-    Write-Host ("imports:  " + (($imports | Sort-Object -Unique) -join ', '))
-    Write-Host "version:  $fileVersion; linker $($pe.LinkerVersion)"
+    Write-Host "path:     $exe"
+    Say "exe:      $(Split-Path -Leaf $exe)"
+    Say "size:     $size bytes"
+    Say "sha256:   $sha"
+    Say ("imports:  " + (($imports | Sort-Object -Unique) -join ', '))
+    Say "version:  $fileVersion; linker $($pe.LinkerVersion)"
     if ($fail.Count) {
-        foreach ($f in $fail) { Write-Host "FAIL: the exe $f" }
+        foreach ($f in $fail) { Say "FAIL: the exe $f" }
         return $false
     }
-    Write-Host 'PASS: every check passed'
+    Say 'PASS: every check passed'
     return $true
 }
 
 # ---- main ---------------------------------------------------------------------
 
+function Write-Info {
+    if ($InfoFile) { [IO.File]::WriteAllText($InfoFile, (($report -join "`n") + "`n")) }
+}
+
 if ($CheckOnly) {
     $ok = Test-Exe $CheckOnly
+    Write-Info
     exit $(if ($ok) { 0 } else { 1 })
 }
 
@@ -218,13 +256,19 @@ Push-Location $repo
 try {
     & $cargo @args2
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
-    Write-Host ("rustc:    " + (& (Join-Path (Split-Path $cargo) 'rustc.exe') -V))
+    Say ("rustc:    " + (& (Join-Path (Split-Path $cargo) 'rustc.exe') -V))
 } finally {
     Pop-Location
     $env:CARGO_ENCODED_RUSTFLAGS = $saved
 }
-if ($env:VCToolsVersion) { Write-Host "msvc:     $env:VCToolsVersion" }
-if ($env:WindowsSDKVersion) { Write-Host "sdk:      $($env:WindowsSDKVersion.TrimEnd('\'))" }
+if ($env:VCToolsVersion) {
+    # A developer prompt: its toolset and SDK are the ones used.
+    Say "msvc:     $env:VCToolsVersion"
+    if ($env:WindowsSDKVersion) { Say "sdk:      $($env:WindowsSDKVersion.TrimEnd('\'))" }
+} else {
+    Get-Toolset
+}
 $td = if ($TargetDir) { $TargetDir } else { Join-Path $repo 'target' }
 $ok = Test-Exe (Join-Path $td 'release\tinymon.exe')
+Write-Info
 exit $(if ($ok) { 0 } else { 1 })
