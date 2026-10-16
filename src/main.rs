@@ -221,11 +221,13 @@ fn fitted_size(st: &AppState, max_h: i32) -> (i32, i32, usize) {
 /// as the work area nearest to home allows (home is kept, so the widget goes
 /// back once home fits again). With no home yet (the first run), the top-right
 /// corner of the primary work area becomes home and is saved. The widget is at
-/// most as tall as that work area. SetWindowPos sends messages to the widget,
-/// so it runs after the borrow ends.
+/// most as tall as that work area. Nothing happens during a drag: a second
+/// launch, a display or a work-area change would make the widget jump under
+/// the pointer, and the drop then decides where it goes. SetWindowPos sends
+/// messages to the widget, so it runs after the borrow ends.
 unsafe fn place_widget(hwnd: HWND) {
     let p = state_ptr(hwnd);
-    if p.is_null() {
+    if p.is_null() || (*p).in_move {
         return;
     }
     let (x, y, w, h) = {

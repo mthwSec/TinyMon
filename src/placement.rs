@@ -33,8 +33,9 @@ pub fn fit_into(x: i32, y: i32, w: i32, h: i32, wa: RECT) -> (i32, i32) {
 pub fn anchored(old: RECT, w: i32, h: i32, wa: RECT) -> ((i32, i32), bool) {
     let right_half = past_centre(old.left, old.right, wa.left, wa.right);
     let lower_half = past_centre(old.top, old.bottom, wa.top, wa.bottom);
-    let x = if right_half { old.right - w } else { old.left };
-    let y = if lower_half { old.bottom - h } else { old.top };
+    // Saturating: `old` can be a rect from outside (WM_DPICHANGED's).
+    let x = if right_half { old.right.saturating_sub(w) } else { old.left };
+    let y = if lower_half { old.bottom.saturating_sub(h) } else { old.top };
     let spot = fit_into(x, y, w, h, wa);
     (spot, spot != (x, y))
 }
@@ -165,6 +166,19 @@ mod tests {
     #[test]
     fn fit_oversized_pins_top_left() {
         assert_eq!(fit_into(100, 100, 200, 2000, PRIMARY), (100, 0));
+    }
+
+    /// Not a spec test: WM_DPICHANGED's suggested rect comes from outside,
+    /// and an odd one (right edge near i32::MIN on a monitor left of the
+    /// primary) must still land in the work area instead of overflowing.
+    #[test]
+    fn anchored_cannot_overflow_on_an_odd_rect() {
+        let wa = rect(-1920, -39, 0, 1041);
+        let odd = rect(i32::MAX, i32::MAX, i32::MIN + 100, i32::MIN + 100);
+        let ((x, y), clamped) = anchored(odd, 200, 216, wa);
+        assert!(clamped);
+        assert!((wa.left..=wa.right - 200).contains(&x), "{x}");
+        assert!((wa.top..=wa.bottom - 216).contains(&y), "{y}");
     }
 
     #[test]
