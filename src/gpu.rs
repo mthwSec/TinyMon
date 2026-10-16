@@ -73,6 +73,24 @@ impl Adapters {
     }
 }
 
+/// Number the names that occur more than once, in order ("GPU 1", "GPU 2"),
+/// so that two adapters with one short name keep apart in their row labels.
+fn number_duplicates(names: &mut [String]) {
+    for i in 0..names.len() {
+        if names.iter().filter(|n| **n == names[i]).count() < 2 {
+            continue;
+        }
+        let name = names[i].clone();
+        let mut k = b'0';
+        for n in names.iter_mut().filter(|n| **n == name) {
+            // One digit: no machine has ten adapters of one name.
+            k = (k + 1).min(b'9');
+            n.push(' ');
+            n.push(char::from(k));
+        }
+    }
+}
+
 /// All non-software GPUs `factory` lists: name, integrated or discrete, and
 /// memory total. Usage is not read here: DXGI's QueryVideoMemoryInfo reports
 /// only this process's own usage (about 0, TinyMon creates no device);
@@ -111,6 +129,11 @@ fn enumerate(factory: &IDXGIFactory4) -> Vec<GpuAdapter> {
                 luid,
             });
         }
+    }
+    let mut names: Vec<String> = gpus.iter().map(|g| g.name.clone()).collect();
+    number_duplicates(&mut names);
+    for (g, name) in gpus.iter_mut().zip(names) {
+        g.name = name;
     }
     gpus
 }
@@ -287,6 +310,15 @@ pub fn short_name(desc: &str) -> String {
     }
     // "Graphics" is noise in names like "Intel UHD Graphics 770".
     s = s.replace(" Graphics ", " ").replace(" Graphics", "");
+    // Laptop variants and a trailing memory size add width, not identity:
+    // "GTX 1650 with Max-Q Design", "RTX 4060 Laptop GPU", "Arc 140V GPU (16GB)"
+    // (a "GPU" word goes only before such a bracket: "Some Custom GPU" stays).
+    let bracket = s.ends_with(')') && s.rfind(" (").map(|i| s.truncate(i)).is_some();
+    for suffix in [" with Max-Q Design", " with Max-P Design", " Laptop GPU", " GPU"] {
+        if s.ends_with(suffix) && (bracket || suffix != " GPU") {
+            s.truncate(s.len() - suffix.len());
+        }
+    }
     // A Ryzen iGPU ("AMD Radeon(TM) Graphics") names no model: keep the brand.
     if s == "Graphics" {
         s = branded.replace(" Graphics", "");
@@ -699,6 +731,23 @@ mod tests {
             assert_eq!(short_name(blank), "GPU", "{blank:?}");
         }
         assert_eq!(short_name("\tNVIDIA GeForce  RTX 4080\t"), "RTX 4080");
+    }
+
+    #[test]
+    fn long_names_lose_their_suffixes() {
+        assert_eq!(short_name("Intel(R) Arc(TM) 140V GPU (16GB)"), "Intel Arc 140V");
+        assert_eq!(short_name("NVIDIA GeForce GTX 1650 with Max-Q Design"), "GTX 1650");
+        assert_eq!(short_name("NVIDIA GeForce RTX 4060 Laptop GPU"), "RTX 4060");
+        // An unknown name keeps its "GPU"; a name that is only a bracket stays.
+        assert_eq!(short_name("Some Custom GPU"), "Some Custom GPU");
+        assert_eq!(short_name("(weird)"), "(weird)");
+    }
+
+    #[test]
+    fn duplicate_names_are_numbered() {
+        let mut names = vec!["GPU".to_string(), "RTX 3050".into(), "GPU".into()];
+        number_duplicates(&mut names);
+        assert_eq!(names, ["GPU 1", "RTX 3050", "GPU 2"]);
     }
 
     #[test]
