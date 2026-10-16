@@ -23,7 +23,7 @@ fn filetime_ticks(ft: FILETIME) -> u64 {
 /// `GetSystemTimes` polls. On Windows the kernel time already includes idle
 /// time, so total = kernel + user and the busy portion is total - idle.
 pub fn cpu_percent(idle_delta: u64, kernel_delta: u64, user_delta: u64) -> f32 {
-    let total = kernel_delta + user_delta;
+    let total = kernel_delta.saturating_add(user_delta);
     if total == 0 {
         return 0.0;
     }
@@ -49,20 +49,35 @@ pub fn load_color(load: f32) -> (u8, u8, u8) {
     (lerp(from.0, to.0, t), lerp(from.1, to.1, t), lerp(from.2, to.2, t))
 }
 
+/// The CPU usage of one poll, from the (idle, kernel, user) times of the
+/// previous poll and this one: 0 with no previous poll (the baseline), the
+/// usage over the interval, or `last`, the previous value, when any of the
+/// times stepped back, which a wrapping difference would turn into a bogus
+/// spike.
+fn cpu_step(prev: Option<(u64, u64, u64)>, cur: (u64, u64, u64), last: Option<f32>) -> Option<f32> {
+    let Some(p) = prev else { return Some(0.0) };
+    match (cur.0.checked_sub(p.0), cur.1.checked_sub(p.1), cur.2.checked_sub(p.2)) {
+        (Some(idle), Some(kernel), Some(user)) => Some(cpu_percent(idle, kernel, user)),
+        _ => last,
+    }
+}
+
 /// Rolling CPU sampler: remembers the previous poll so each new poll yields the
 /// usage percentage over the interval between them.
 pub struct CpuSampler {
     prev: Option<(u64, u64, u64)>,
+    last: Option<f32>,
 }
 
 impl CpuSampler {
     pub fn new() -> Self {
-        Self { prev: None }
+        Self { prev: None, last: None }
     }
 
-    /// Poll the system times and return CPU usage since the previous poll. The
-    /// first call only establishes a baseline and returns 0.
-    pub fn sample(&mut self) -> f32 {
+    /// Poll the system times and return CPU usage since the previous poll
+    /// (`cpu_step`): the first call only establishes a baseline and returns 0.
+    /// None when the times cannot be read, so the row shows n/a, not 0%.
+    pub fn sample(&mut self) -> Option<f32> {
         let mut idle = FILETIME::default();
         let mut kernel = FILETIME::default();
         let mut user = FILETIME::default();
@@ -70,18 +85,13 @@ impl CpuSampler {
         // have initialized; the pointers are non-null and non-aliasing.
         let ok = unsafe { GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)) };
         if ok.is_err() {
-            return 0.0;
+            self.last = None;
+            return None;
         }
         let cur = (filetime_ticks(idle), filetime_ticks(kernel), filetime_ticks(user));
-        let pct = match self.prev {
-            Some(p) => cpu_percent(
-                cur.0.wrapping_sub(p.0),
-                cur.1.wrapping_sub(p.1),
-                cur.2.wrapping_sub(p.2),
-            ),
-            None => 0.0,
-        };
+        let pct = cpu_step(self.prev, cur, self.last);
         self.prev = Some(cur);
+        self.last = pct;
         pct
     }
 }
@@ -114,6 +124,24 @@ pub fn read_memory() -> MemInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_step_keeps_the_last_value_when_a_counter_steps_back() {
+        // (idle, kernel, user) ticks: 50, 80 and 20 more is 50% busy.
+        assert_eq!(cpu_step(Some((100, 1000, 200)), (150, 1080, 220), Some(10.0)), Some(50.0));
+        // The kernel or the idle time stepped back: no wrapped 100% spike,
+        // the last value stands for this tick.
+        assert_eq!(cpu_step(Some((100, 1000, 200)), (150, 990, 220), Some(10.0)), Some(10.0));
+        assert_eq!(cpu_step(Some((100, 1000, 200)), (90, 1080, 220), Some(10.0)), Some(10.0));
+        assert_eq!(cpu_step(Some((100, 1000, 200)), (150, 1080, 190), None), None);
+        // The first poll is the baseline.
+        assert_eq!(cpu_step(None, (150, 1080, 220), None), Some(0.0));
+    }
+
+    #[test]
+    fn cpu_percent_cannot_overflow() {
+        assert_eq!(cpu_percent(0, u64::MAX, u64::MAX), 100.0);
+    }
 
     #[test]
     fn cpu_all_idle_is_zero() {

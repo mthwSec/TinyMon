@@ -204,7 +204,7 @@ impl MetricKey {
 pub enum MetricSource {
     Cpu {
         sampler: CpuSampler,
-        pct: f32,
+        pct: Option<f32>,
     },
     Ram {
         info: MemInfo,
@@ -264,7 +264,7 @@ impl MetricSource {
     pub fn rows(&self, out: &mut Vec<Row>) {
         let start = out.len();
         match self {
-            MetricSource::Cpu { pct, .. } => out.push(cpu_row(*pct)),
+            MetricSource::Cpu { pct, .. } => out.push(pct.map_or_else(|| Row::na("CPU"), cpu_row)),
             MetricSource::Ram { info } => out.push(ram_row(info)),
             MetricSource::Gpu(group) => group.rows(out),
             MetricSource::Vram(g) => g.rows(out),
@@ -295,7 +295,7 @@ pub fn build_sources(settings: &Settings) -> Vec<MetricSource> {
             MetricKey::Cpu => {
                 let mut sampler = CpuSampler::new();
                 sampler.sample(); // prime the baseline for the first real delta
-                MetricSource::Cpu { sampler, pct: 0.0 }
+                MetricSource::Cpu { sampler, pct: Some(0.0) }
             }
             MetricKey::Ram => MetricSource::Ram { info: read_memory() },
             MetricKey::Gpu => MetricSource::Gpu(GpuGroup::new()),
@@ -440,6 +440,15 @@ pub fn fmt_rate(bps: f64) -> String {
 mod tests {
     use super::*;
 
+    /// A failed GetSystemTimes leaves the CPU without a reading: n/a, not 0%.
+    #[test]
+    fn cpu_without_a_reading_is_na() {
+        let mut out = Vec::new();
+        MetricSource::Cpu { sampler: CpuSampler::new(), pct: None }.rows(&mut out);
+        assert_eq!((out[0].label.as_str(), out[0].value.as_str()), ("CPU", "n/a"));
+        assert!(out[0].bar.is_none());
+    }
+
     #[test]
     fn metric_key_roundtrip() {
         for k in MetricKey::ALL {
@@ -565,7 +574,7 @@ mod tests {
         // two value-only n/a rows, so the mask must cover every row of a
         // metric, not only its first, and each row must be tagged Disk.
         let sources = [
-            MetricSource::Cpu { sampler: CpuSampler::new(), pct: 73.0 },
+            MetricSource::Cpu { sampler: CpuSampler::new(), pct: Some(73.0) },
             MetricSource::Ram { info: MemInfo { load_pct: 58.0, used_gib: 9.3, total_gib: 16.0 } },
             MetricSource::PerCpu(PerCpuSampler::new()),
             MetricSource::Disk(DiskSampler::new()),
