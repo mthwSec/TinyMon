@@ -402,7 +402,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1 -CheckOnly pa
 It hides the cargo home (whose path contains your user name) behind `/cargo`,
 builds, and then fails if the exe imports the Visual C++ runtime, contains a
 user or build path, lacks its icon, version information or manifest, carries
-another version than `Cargo.toml`, or is larger than 282,624 bytes. It prints
+another version than `Cargo.toml`, or is larger than 286,720 bytes. It prints
 the size, the SHA-256 and the tools used (rustc, the MSVC toolset, the
 Windows SDK).
 

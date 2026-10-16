@@ -20,7 +20,7 @@ param(
     [string]$CheckOnly,
     [string]$TargetDir,
     [switch]$NoDefaultFeatures,
-    [int]$MaxSize = 282624,
+    [int]$MaxSize = 286720,
     [string]$InfoFile
 )
 $ErrorActionPreference = 'Stop'

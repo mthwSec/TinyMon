@@ -11,6 +11,7 @@ use crate::registry::Row;
 use crate::pdh::PdhCounter;
 
 use windows::core::{w, Interface};
+use windows::Win32::Foundation::LUID;
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter3, IDXGIFactory4, DXGI_ADAPTER_FLAG_SOFTWARE,
     DXGI_MEMORY_SEGMENT_GROUP, DXGI_MEMORY_SEGMENT_GROUP_LOCAL,
@@ -31,6 +32,16 @@ pub struct GpuAdapter {
     /// Lowercased "luid_0x..._0x..." token, used to match this adapter to PDH
     /// "GPU Engine" and "GPU Adapter Memory" counter instances.
     luid_key: String,
+    /// The adapter's LUID, which opens it for D3DKMT queries (temperature).
+    luid: LUID,
+}
+
+impl GpuAdapter {
+    /// The adapter's LUID (the Temperature metric's GPU rows read it).
+    #[cfg_attr(not(feature = "temp"), allow(dead_code))]
+    pub fn luid(&self) -> LUID {
+        self.luid
+    }
 }
 
 /// Enumerate all non-software GPUs: name, integrated or discrete, and memory
@@ -72,6 +83,7 @@ pub fn detect_gpus() -> Vec<GpuAdapter> {
                 vram_used: None,
                 load: None,
                 luid_key: luid_key(luid.HighPart, luid.LowPart),
+                luid,
             });
         }
     }
@@ -403,6 +415,7 @@ mod tests {
             vram_used: None,
             load,
             luid_key: luid_key(0, 0x109f8),
+            luid: LUID { LowPart: 0x109f8, HighPart: 0 },
         }
     }
 

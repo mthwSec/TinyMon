@@ -20,6 +20,8 @@ mod dpi;
 // emits no metric. See src/fps.rs.
 mod fps;
 mod gpu;
+#[cfg(feature = "temp")]
+mod gputemp;
 mod history;
 mod hotkeys;
 mod icon;

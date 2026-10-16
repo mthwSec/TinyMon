@@ -14,7 +14,10 @@
 use core::cell::RefCell;
 
 use windows::core::w;
+use windows::Win32::Foundation::LUID;
 
+use crate::gpu;
+use crate::gputemp;
 use crate::pdh::PdhCounter;
 use crate::registry::Row;
 
@@ -31,6 +34,8 @@ pub struct TempSource {
     /// Every zone with a plausible reading since the source was built, in the
     /// order first seen.
     zones: Vec<Zone>,
+    /// One sensor per hardware GPU, read through D3DKMT (`gputemp`).
+    gpus: Vec<GpuTemp>,
 }
 
 impl TempSource {
@@ -38,17 +43,57 @@ impl TempSource {
         TempSource {
             zone: PdhCounter::new(w!("\\Thermal Zone Information(*)\\Temperature")),
             zones: Vec::new(),
+            gpus: gpu::detect_gpus().iter().map(|g| GpuTemp::new(&g.name, g.luid())).collect(),
         }
     }
 
     pub fn sample(&mut self) {
         let sample = self.zone.sample();
         PROVEN_ZONES.with(|p| observe_zones(&mut self.zones, &sample, &mut p.borrow_mut()));
+        for g in self.gpus.iter_mut() {
+            let reading = gputemp::read(g.luid);
+            note_gpu_reading(g, reading);
+        }
     }
 
     pub fn rows(&self, out: &mut Vec<Row>) {
-        build_rows(&self.zones, out);
+        build_rows(&self.gpus, &self.zones, out);
     }
+}
+
+/// One GPU's temperature sensor.
+struct GpuTemp {
+    /// The adapter's short name ("RTX 4080").
+    name: String,
+    luid: LUID,
+    /// Shown: the driver has reported a plausible temperature since the source
+    /// was built. Never resets.
+    live: bool,
+    /// The last sample's reading in degrees Celsius; None without one.
+    now: Option<f64>,
+}
+
+impl GpuTemp {
+    fn new(name: &str, luid: LUID) -> Self {
+        GpuTemp { name: name.to_string(), luid, live: false, now: None }
+    }
+}
+
+/// Record one sample's reading of a GPU sensor: a plausible one makes it
+/// live, for good; a missing one leaves it without a current reading.
+fn note_gpu_reading(g: &mut GpuTemp, reading: Option<f64>) {
+    g.now = reading;
+    g.live |= reading.is_some();
+}
+
+/// The shown GPU sensors as (label, degrees Celsius or None): "GPU" when one
+/// GPU has reported, else "GPU" and the adapter's name.
+fn gpu_rows(gpus: &[GpuTemp]) -> Vec<(String, Option<f64>)> {
+    let several = gpus.iter().filter(|g| g.live).count() > 1;
+    gpus.iter()
+        .filter(|g| g.live)
+        .map(|g| (if several { format!("GPU {}", g.name) } else { "GPU".into() }, g.now))
+        .collect()
 }
 
 /// One thermal zone, followed across samples by its PDH instance name.
@@ -89,6 +134,11 @@ fn observe_zones(zones: &mut Vec<Zone>, sample: &[(String, f64)], proven: &mut V
             zones.len() - 1
         });
         let z = &mut zones[i];
+        // A second reading under the same name in one sample would look like
+        // movement: only the first one counts.
+        if z.now.is_some() {
+            continue;
+        }
         z.now = Some(*k);
         if !z.live && (k - z.first).abs() >= 0.5 {
             z.live = true;
@@ -98,41 +148,45 @@ fn observe_zones(zones: &mut Vec<Zone>, sample: &[(String, f64)], proven: &mut V
 }
 
 /// A zone's label: "ACPI Temp" for a board's only zone; with several, "ACPI"
-/// and the zone's 4-character ACPI name, the end of its instance name
-/// (`\_tz.thrm` reads "ACPI THRM"). Nothing says which part of the machine a
-/// zone measures, so it is never "CPU Temp".
+/// and the zone's ACPI name, the part of its instance name after the last '.'
+/// or '\' (`\_tz.thrm` reads "ACPI THRM", `\_tz.tz0` "ACPI TZ0"; Windows trims
+/// the names' padding). Nothing says which part of the machine a zone
+/// measures, so it is never "CPU Temp".
 fn zone_label(instance: &str, several: bool) -> String {
     if !several {
         return "ACPI Temp".into();
     }
-    // `get`, not slicing: a name whose last 4 bytes start inside a character
-    // is taken whole instead of panicking.
-    let name = instance.get(instance.len().saturating_sub(4)..).unwrap_or(instance);
-    format!("ACPI {name}").to_ascii_uppercase()
+    let name = instance.rsplit(['.', '\\']).next().unwrap_or(instance);
+    format!("ACPI {name}").trim_end().to_ascii_uppercase()
 }
 
-/// The shown zones as (label, degrees Celsius), in the order first seen: the
-/// live zones with a reading in the last sample. Every zone seen counts
-/// towards "several", so a real zone next to a hidden stub keeps its name.
-fn live_zone_rows(zones: &[Zone]) -> Vec<(String, f64)> {
+/// The shown zones as (label, degrees Celsius or None), in the order first
+/// seen: every live zone, with None when it had no reading in the last sample.
+/// Every zone seen counts towards "several", so a real zone next to a hidden
+/// stub keeps its name.
+fn live_zone_rows(zones: &[Zone]) -> Vec<(String, Option<f64>)> {
     let several = zones.len() > 1;
     zones
         .iter()
         .filter(|z| z.live)
-        .filter_map(|z| z.now.map(|k| (zone_label(&z.name, several), k - 273.15)))
+        .map(|z| (zone_label(&z.name, several), z.now.map(|k| k - 273.15)))
         .collect()
 }
 
-/// The metric's rows, all put together here: one per shown zone, else one
-/// value-only "Temp n/a" row, so an enabled metric stays visible. Another
-/// temperature source (a discrete GPU's, say) would add its rows here.
-fn build_rows(zones: &[Zone], out: &mut Vec<Row>) {
-    let rows = live_zone_rows(zones);
+/// The metric's rows, all put together here: the GPU sensors' rows, then the
+/// shown zones' (a value-only n/a row for one without a current reading, so
+/// the row count stays stable), else one value-only "Temp n/a" row, so an
+/// enabled metric stays visible.
+fn build_rows(gpus: &[GpuTemp], zones: &[Zone], out: &mut Vec<Row>) {
+    let rows: Vec<_> = gpu_rows(gpus).into_iter().chain(live_zone_rows(zones)).collect();
     if rows.is_empty() {
         out.push(Row::na("Temp"));
     }
     for (label, celsius) in rows {
-        out.push(temp_row(&label, celsius));
+        out.push(match celsius {
+            Some(c) => temp_row(&label, c),
+            None => Row::na(label),
+        });
     }
 }
 
@@ -142,7 +196,10 @@ pub fn temp_row(name: &str, celsius: f64) -> Row {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_rows, live_zone_rows, observe_zones, temp_row, zone_label, Zone};
+    use super::{
+        build_rows, live_zone_rows, note_gpu_reading, observe_zones, temp_row, zone_label, GpuTemp,
+        Zone,
+    };
 
     #[test]
     fn formats() {
@@ -165,9 +222,23 @@ mod tests {
 
     /// The (label, value, has a bar) of each row build_rows puts together.
     fn shown(zones: &[Zone]) -> Vec<(String, String, bool)> {
+        shown_with(&[], zones)
+    }
+
+    /// The same, with GPU readings.
+    fn shown_with(gpus: &[GpuTemp], zones: &[Zone]) -> Vec<(String, String, bool)> {
         let mut out = Vec::new();
-        build_rows(zones, &mut out);
+        build_rows(gpus, zones, &mut out);
         out.into_iter().map(|r| (r.label, r.value, r.bar.is_some())).collect()
+    }
+
+    /// A GPU sensor after `readings`, one per tick.
+    fn gpu(name: &str, readings: &[Option<f64>]) -> GpuTemp {
+        let mut g = GpuTemp::new(name, Default::default());
+        for r in readings {
+            note_gpu_reading(&mut g, *r);
+        }
+        g
     }
 
     fn row(label: &str, value: &str, bar: bool) -> (String, String, bool) {
@@ -202,7 +273,7 @@ mod tests {
         let live = live_zone_rows(&zones);
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].0, "ACPI Temp");
-        assert!((live[0].1 - 44.85).abs() < 1e-9);
+        assert!((live[0].1.unwrap() - 44.85).abs() < 1e-9);
         assert_eq!(shown(&zones), [row("ACPI Temp", "45\u{00B0}C", true)]);
         assert_eq!(proven, ["\\_tz.tz00"]);
     }
@@ -262,9 +333,69 @@ mod tests {
     fn zone_labels_name_the_acpi_zone() {
         assert_eq!(zone_label("\\_tz.thrm", false), "ACPI Temp");
         assert_eq!(zone_label("\\_tz.thrm", true), "ACPI THRM");
-        // An odd name cannot panic: a short one, and one whose last four
-        // bytes start inside a character.
+        // Windows trims ACPI names to their real length: the name after the
+        // last '.' or '\', not a fixed four characters.
+        assert_eq!(zone_label("\\_tz.tz0", true), "ACPI TZ0");
+        // Odd names cannot panic: a short one, a non-ASCII one, an empty one.
         assert_eq!(zone_label("tz", true), "ACPI TZ");
         assert_eq!(zone_label("\u{00E9}abc", true), "ACPI \u{00E9}ABC");
+        assert_eq!(zone_label("", true), "ACPI");
+    }
+
+    #[test]
+    fn live_zone_without_a_reading_shows_na() {
+        // A shown zone that misses a sample keeps its row as n/a, so the
+        // widget keeps its size; it shows its reading again on the next one.
+        let tz = |k: f64| [("\\_tz.thrm".to_string(), k)];
+        let (mut zones, mut proven) = (Vec::new(), Vec::new());
+        for k in [320.0, 322.0] {
+            observe_zones(&mut zones, &tz(k), &mut proven);
+        }
+        observe_zones(&mut zones, &[], &mut proven);
+        assert_eq!(shown(&zones), [row("ACPI Temp", "n/a", false)]);
+        observe_zones(&mut zones, &tz(323.0), &mut proven);
+        assert_eq!(shown(&zones), [row("ACPI Temp", "50\u{00B0}C", true)]);
+    }
+
+    #[test]
+    fn duplicate_instance_names_in_one_sample_count_once() {
+        // Two readings under one name in a sample would look like movement;
+        // only the first counts, so a stub stays a stub.
+        let dup: &[(&str, f64)] = &[("\\_tz.tz00", 301.0), ("\\_tz.tz00", 303.0)];
+        let mut proven = Vec::new();
+        let zones = observe(&[dup; 10], &mut proven);
+        assert_eq!(shown(&zones), [row("Temp", "n/a", false)]);
+        assert!(proven.is_empty());
+    }
+
+    #[test]
+    fn gpu_rows_come_first_and_name_the_gpu_when_several() {
+        let stub: &[(&str, f64)] = &[("\\_tz.tz00", 301.0)];
+        let zones = observe(&[stub; 3], &mut Vec::new());
+        // One reporting GPU is "GPU"; a GPU that never reported gets no row.
+        let gpus = [gpu("RTX 4080", &[Some(52.0)]), gpu("Intel UHD 730", &[None, None])];
+        assert_eq!(shown_with(&gpus, &zones), [row("GPU", "52\u{00B0}C", true)]);
+        // Several reporting GPUs are named.
+        let gpus = [gpu("RTX 4080", &[Some(52.0)]), gpu("Arc 140V", &[Some(48.4)])];
+        assert_eq!(
+            shown_with(&gpus, &zones),
+            [row("GPU RTX 4080", "52\u{00B0}C", true), row("GPU Arc 140V", "48\u{00B0}C", true)]
+        );
+        // GPU rows come before the live zones.
+        let tz = observe(&[&[("\\_tz.thrm", 320.0)], &[("\\_tz.thrm", 322.0)]], &mut Vec::new());
+        let gpus = [gpu("RTX 4080", &[Some(61.0)])];
+        assert_eq!(
+            shown_with(&gpus, &tz),
+            [row("GPU", "61\u{00B0}C", true), row("ACPI Temp", "49\u{00B0}C", true)]
+        );
+    }
+
+    #[test]
+    fn gpu_that_reported_once_shows_na_without_a_reading() {
+        let gpus = [gpu("RTX 4080", &[Some(55.0), None])];
+        assert_eq!(shown_with(&gpus, &[]), [row("GPU", "n/a", false)]);
+        // A GPU that never reported adds nothing: the metric's own n/a row.
+        let gpus = [gpu("Intel UHD 730", &[None, None, None])];
+        assert_eq!(shown_with(&gpus, &[]), [row("Temp", "n/a", false)]);
     }
 }
