@@ -6,6 +6,10 @@ no Electron, no webview, no .NET, no scripting runtime. One small `.exe`
 borderless, semi-transparent widget, with a tray icon, two optional global
 hotkeys and a native settings window with a live preview.
 
+![The TinyMon widget with sample values: CPU, RAM, GPU, VRAM, network up and down, temperature and uptime rows, each with a sparkline](screenshots/widget.png)
+
+The parts of a row:
+
 ```text
 +------------------------------+
 | TinyMon                   +2 |   dim title; "+N" when rows do not fit the screen
@@ -446,8 +450,8 @@ The exe is not code-signed, so on a first run Windows SmartScreen may show
 ## Tests
 
 ```sh
-cargo test                          # 252 tests, 2 diagnostics ignored
-cargo test --no-default-features    # 232 tests, 2 diagnostics ignored
+cargo test                          # 252 tests; 3 ignored: 2 diagnostics, the README picture
+cargo test --no-default-features    # 232 tests, the same 3 ignored
 cargo test -- --ignored --nocapture dump_   # print the detected GPUs and GPU engines
 ```
 
@@ -479,8 +483,9 @@ scripts/
   ci.yml            fmt, clippy, tests and the release checks on every push
                     to main and every pull request
   release.yml       the reproducible release build on a version tag
-docs/design/        the designs of the correctness pass and the portable exe
-prompt.txt          the original build brief
+docs/design/        the designs of the correctness pass, the portable exe and
+                    the UX polish
+screenshots/        the README's picture (render_readme_picture renders it)
 src/
   main.rs           the widget: window, message loop, paint, tray icon and menu,
                     placement and resizing, hotkeys, single instance, the

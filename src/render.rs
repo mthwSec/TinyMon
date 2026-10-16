@@ -432,6 +432,90 @@ mod tests {
     use crate::registry::{cpu_row, ram_row, uptime_row};
     use windows::Win32::Foundation::{POINT, RECT};
 
+    /// Not a test: renders the README's picture of the widget, the settings
+    /// preview's sample rows with its sample history, dark theme, at 150%, to
+    /// the BMP file that TINYMON_SHOT names (`TINYMON_SHOT=widget.bmp cargo
+    /// test -- --ignored render_readme_picture`). Nothing of the machine
+    /// it runs on is drawn.
+    #[test]
+    #[ignore = "renders the README picture: TINYMON_SHOT=<file.bmp> cargo test -- --ignored render_readme_picture"]
+    fn render_readme_picture() {
+        use super::{render_rows, THEME};
+        use crate::registry::{sample_rows, MetricKey};
+        use core::ffi::c_void;
+        use windows::Win32::Graphics::Gdi::{
+            CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject, BITMAPINFO,
+            BITMAPINFOHEADER, DIB_RGB_COLORS, HGDIOBJ,
+        };
+        let path = std::env::var("TINYMON_SHOT").expect("set TINYMON_SHOT to a .bmp path");
+        let keys = [
+            MetricKey::Cpu,
+            MetricKey::Ram,
+            MetricKey::Gpu,
+            MetricKey::Vram,
+            MetricKey::Net,
+            #[cfg(feature = "temp")]
+            MetricKey::Temp,
+            MetricKey::Uptime,
+        ];
+        let rows = sample_rows(&keys);
+        let (scale, font_px) = (Scale(144), 13);
+        let (w, h) = (win_w(scale, font_px), window_height(scale, rows.len() as i32, font_px));
+        // The settings preview's sample history, so the sparklines draw.
+        let hist: Vec<Vec<f32>> = rows
+            .iter()
+            .map(|r| match r.bar {
+                Some(f) => (0..48)
+                    .map(|i| (f + 0.18 * (i as f32 * 0.45).sin()).clamp(0.05, 0.97))
+                    .collect(),
+                None => Vec::new(),
+            })
+            .collect();
+        let hist: Vec<&[f32]> = hist.iter().map(Vec::as_slice).collect();
+        let header = BITMAPINFOHEADER {
+            biSize: core::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w,
+            biHeight: -h, // top-down
+            biPlanes: 1,
+            biBitCount: 32,
+            ..Default::default()
+        };
+        let info = BITMAPINFO { bmiHeader: header, ..Default::default() };
+        let mut bits: *mut c_void = core::ptr::null_mut();
+        let pixels = unsafe {
+            let dc = CreateCompatibleDC(None);
+            let dib = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)
+                .expect("CreateDIBSection");
+            let old = SelectObject(dc, HGDIOBJ(dib.0));
+            let font = crate::create_mono_font(scale, font_px);
+            render_rows(dc, w, h, &rows, font, scale, font_px, &THEME, &hist);
+            let pixels =
+                std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize).to_vec();
+            SelectObject(dc, old);
+            let _ = DeleteObject(HGDIOBJ(font.0));
+            let _ = DeleteObject(HGDIOBJ(dib.0));
+            let _ = DeleteDC(dc);
+            pixels
+        };
+        // A 32-bit BMP: file header, info header, the top-down pixels.
+        let mut file = Vec::with_capacity(54 + pixels.len());
+        file.extend_from_slice(b"BM");
+        file.extend_from_slice(&(54 + pixels.len() as u32).to_le_bytes());
+        file.extend_from_slice(&[0, 0, 0, 0]);
+        file.extend_from_slice(&54u32.to_le_bytes());
+        for v in [40u32, w as u32, (-h) as u32] {
+            file.extend_from_slice(&v.to_le_bytes());
+        }
+        file.extend_from_slice(&1u16.to_le_bytes());
+        file.extend_from_slice(&32u16.to_le_bytes());
+        for v in [0u32, pixels.len() as u32, 3780, 3780, 0, 0] {
+            file.extend_from_slice(&v.to_le_bytes());
+        }
+        file.extend_from_slice(&pixels);
+        std::fs::write(&path, file).expect("write the BMP");
+        println!("{w} x {h} px -> {path}");
+    }
+
     #[test]
     fn geometry_identity_at_96() {
         let s = Scale(96);
