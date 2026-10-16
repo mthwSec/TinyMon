@@ -56,3 +56,11 @@ These are the open wording items of the follow-up inbox sections H and I. They a
 - Every commit's release exe stays at or below 286,720 B, and `scripts/build-release.ps1` passes.
 - An Agent reviewer checks the branch before the merge. The merge happens with the owner's OK.
 - After the merge, the owner's TinyMon is rebuilt with the release script and restarted with the safe swap.
+
+## 5. As built (2026-10-16)
+
+- Release exe: 286,208 B (281,088 B without default features), +5,632 B over 280,576 B and 512 B under the stop. GPU temperature costs 2,560 B, the adapter re-detection 512 B, the network fix 512 B, and the GPU name rules 2,048 B (mostly 512-byte section steps). The other fixes cost nothing measurable.
+- Tests: 250 passed with 2 ignored, and 231 with 2 without default features.
+- Deviation from 2.6: a trailing "GPU" word is dropped only before a parenthesised part ("140V GPU (16GB)"). This way an unknown name such as "Some Custom GPU" keeps it, as an existing test requires.
+- `place_widget` itself skips while a drag is in progress, which covers all of its callers.
+- `scripts/build-release.ps1`'s default size stop is 286,720 B.

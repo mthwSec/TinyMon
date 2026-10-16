@@ -101,8 +101,8 @@ const WM_TRAY: u32 = WM_APP + 1;
 /// Posted by `queue_apply` when the settings window applies. The message
 /// carries nothing (wParam is ignored): the settings wait in `PENDING_APPLY`.
 const WM_APP_APPLY: u32 = WM_APP + 2;
-/// Posted by the settings window when it closes; clears the single-instance
-/// slot once that window is gone.
+/// Posted by the settings window when it closes; clears the one-settings-
+/// window slot (settings_hwnd) once that window is gone.
 pub(crate) const WM_APP_SETTINGS_CLOSED: u32 = WM_APP + 3;
 /// Posted by a second launch of TinyMon to the running widget, which comes
 /// back (claim_single_instance, surface). It goes from one process to
@@ -200,7 +200,8 @@ struct AppState {
     back_w: i32,
     back_h: i32,
     cfg_path: Option<PathBuf>,
-    /// The open settings window (HWND(null) when closed) — single-instance guard.
+    /// The open settings window (HWND(null) when closed), so that there is
+    /// only one at a time.
     settings_hwnd: HWND,
 }
 
@@ -376,8 +377,8 @@ fn first_tick_ms(interval_ms: u32) -> u32 {
 /// The period TIMER_ID is armed with when an Apply changes the interval.
 /// While the first tick after a build of the sources is still due, it is
 /// that tick's capped period (first_tick_ms), so the pending marker still
-/// ends within a second; the tick then re-arms at the interval. Otherwise
-/// it is the interval.
+/// ends within a second; when that capped the period, the tick then re-arms
+/// at the interval. Otherwise it is the interval.
 fn timer_period(interval_ms: u32, first_tick_pending: bool) -> u32 {
     if first_tick_pending {
         first_tick_ms(interval_ms)
@@ -637,8 +638,9 @@ unsafe extern "system" fn wnd_proc(
                         s.sample();
                     }
                     // The first tick after a build of the sources may come
-                    // early (first_tick_ms): it ends the pending marker and
-                    // re-arms the timer at the configured interval.
+                    // early (first_tick_ms): it ends the pending marker and,
+                    // when the cap shortened it, re-arms the timer at the
+                    // configured interval.
                     let interval = st.settings.interval_ms;
                     let first = core::mem::take(&mut st.first_tick_pending);
                     if first && first_tick_ms(interval) < interval {
@@ -714,7 +716,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
 
-        // Settings window closed: clear the single-instance slot, but only once
+        // Settings window closed: clear the one-window slot, but only once
         // that window is really gone. A stray post while it is open would let a
         // second settings window open next to it, sharing its thread-local state.
         WM_APP_SETTINGS_CLOSED => {
@@ -1268,7 +1270,7 @@ fn persist(st: &AppState) {
     let _ = config::write(path, &st.settings.to_config());
 }
 
-/// Open the settings window (single-instance: focus it if already open).
+/// Open the settings window, or focus it if it is already open (one at a time).
 /// settings_win::open sends messages to the widget, and the settings window's
 /// WM_CREATE reads the settings through current_settings, so no AppState
 /// reference is live across it; the state is fetched again to store the new

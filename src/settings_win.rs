@@ -511,7 +511,8 @@ fn reorder_step(len: usize, row: usize, up: bool, double: bool) -> Option<(usize
 }
 
 /// The settings window's procedure. The `unsafe extern "system"` signature is
-/// mandated by Win32; each arm documents the calls it makes.
+/// mandated by Win32; the arms that call into other windows or the system
+/// say why those calls are safe.
 unsafe extern "system" fn settings_proc(
     hwnd: HWND,
     msg: u32,

@@ -1,4 +1,4 @@
-//! Portable config: save/restore window position + settings.
+//! Portable config: save and restore the widget's home and the settings.
 //!
 //! Location strategy: prefer `tinymon.cfg` next to the .exe (USB-portable); if
 //! that folder isn't writable, fall back to `%APPDATA%\TinyMon\tinymon.cfg`.

@@ -193,10 +193,11 @@ impl MetricKey {
         MetricKey::Battery,
         MetricKey::Temp,
     ];
-    /// The default enabled set, in both builds: what a config without a
-    /// `metrics=` key and "Reset to defaults" enable; the rest are opt-in.
-    /// Temperature is opt-in too: most desktops have no live thermal zone, so
-    /// it would show "Temp n/a" for good.
+    /// The default enabled set, in both builds: the metrics enabled by a config
+    /// without a `metrics=` key and by "Reset to defaults"; the rest are
+    /// opt-in. Temperature is opt-in too: many machines have neither a live
+    /// thermal zone nor a GPU that reports its temperature, and would only
+    /// show "Temp n/a".
     pub const DEFAULT: [MetricKey; 3] = [MetricKey::Cpu, MetricKey::Ram, MetricKey::Gpu];
 }
 

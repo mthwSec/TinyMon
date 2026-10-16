@@ -99,7 +99,8 @@ fn approved_disabled(data: &[u8]) -> bool {
 }
 
 /// The Run value's command line, cut at its first zero, when the value is a
-/// string (REG_SZ) of at most 1023 UTF-16 units.
+/// string of at most 1023 UTF-16 units: REG_SZ, or REG_EXPAND_SZ, which
+/// RegGetValueW expands (the limit then applies to the expanded text).
 fn run_value() -> Option<String> {
     let mut buf = [0u16; 1024];
     // SAFETY: `buf` is as large as the size passed with it.
@@ -120,8 +121,9 @@ fn disabled_in_task_manager() -> bool {
 
 /// RegGetValueW for the value "TinyMon" of HKCU\`key`, of a type in `flags`,
 /// into the `size` bytes at `data`, which must be writable (a string comes
-/// back with a final zero). Returns the number of bytes read, or None when the
-/// value is missing, of another type or larger than `size`.
+/// back with a final zero). Returns the number of bytes read, or None on any
+/// error: the value or its key is missing, it has another type, it is larger
+/// than `size`, or it cannot be read (access denied).
 unsafe fn get_value(
     key: PCWSTR,
     flags: REG_ROUTINE_FLAGS,
@@ -139,7 +141,8 @@ fn deleted(result: WIN32_ERROR) -> bool {
     result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND
 }
 
-/// The running exe's full path, or None when it is not valid Unicode.
+/// The running exe's full path, or None when it cannot be read or is not
+/// valid Unicode.
 fn exe_path() -> Option<String> {
     std::env::current_exe().ok()?.into_os_string().into_string().ok()
 }

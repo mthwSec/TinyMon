@@ -1,15 +1,19 @@
-//! The Temperature metric (Cargo feature `temp`, on by default): the ACPI
-//! thermal zones Windows publishes through the PDH counter
-//! `\Thermal Zone Information(*)\Temperature`, read without admin rights or
-//! extra software. The counter reports whole kelvin; readings outside 1-150 C
-//! are ignored. A zone is shown only once its reading has moved: many boards
-//! publish a firmware stub that reads one constant at any load, and a reading
-//! that never moved is no evidence of a sensor. A zone that has moved stays
-//! shown for the rest of the process, also after a metric Apply rebuilds the
-//! source (`PROVEN_ZONES`). The labels name what is read, an ACPI zone:
-//! "ACPI Temp" when the board has one zone, otherwise "ACPI" and the zone's
-//! ACPI name ("ACPI THRM"), never "CPU Temp". With no zone shown, the metric
-//! keeps one "Temp n/a" row, so an enabled metric stays visible.
+//! The Temperature metric (Cargo feature `temp`, on by default): each GPU that
+//! reports its temperature (`gputemp`, D3DKMT), then the ACPI thermal zones
+//! Windows publishes through the PDH counter
+//! `\Thermal Zone Information(*)\Temperature`, all read without admin rights
+//! or extra software. A GPU is shown once its driver has reported a plausible
+//! temperature, as "GPU", or "GPU" and its name when several report. The zone
+//! counter reports whole kelvin; readings outside 1-150 C are ignored. A zone
+//! is shown only once its reading has moved: many boards publish a firmware
+//! stub that reads one constant at any load, and a reading that never moved is
+//! no evidence of a sensor. A zone that has moved stays shown for the rest of
+//! the process, also after a metric Apply rebuilds the source
+//! (`PROVEN_ZONES`). The labels name what is read, an ACPI zone: "ACPI Temp"
+//! when the board has one zone, otherwise "ACPI" and the zone's ACPI name
+//! ("ACPI THRM"), never "CPU Temp". A shown sensor without a reading in a
+//! sample shows n/a; with no sensor shown, the metric keeps one "Temp n/a"
+//! row, so an enabled metric stays visible.
 
 use core::cell::RefCell;
 

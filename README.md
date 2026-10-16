@@ -2,7 +2,7 @@
 
 A tiny always-on-top Windows resource monitor, written in pure Rust and Win32:
 no Electron, no webview, no .NET, no scripting runtime. One small `.exe`
-(about 274 KiB, nothing to install) shows the metrics you pick in a
+(about 280 KiB, nothing to install) shows the metrics you pick in a
 borderless, semi-transparent widget, with a tray icon, two optional global
 hotkeys and a native settings window with a live preview.
 
@@ -117,9 +117,9 @@ say), home stays where it was, so every launch starts from the same spot; a
 widget that grew this way goes back to home's top-left when the screen layout
 changes.
 
-**One TinyMon at a time.** Starting TinyMon again, from any copy, brings the
-running widget back (shown, at home, with its tray icon) and the new launch
-ends. So two portable copies in different folders cannot run at the same
+**One TinyMon at a time.** One TinyMon runs per signed-in user: starting
+TinyMon again, from any copy, brings the running widget back (shown, at home,
+with its tray icon) and the new launch ends. So two portable copies in different folders cannot run at the same
 time. A launch at normal rights next to a TinyMon that runs as administrator
 does run as a second instance (Windows does not let it reach the first). A
 debug build always runs, for development.
@@ -145,7 +145,8 @@ saved; **Cancel**, Esc or closing the window drops them.
   that applies. The font scales the whole widget: taller rows and a wider
   window.
 - **Hotkeys**: a field and a **Clear** button for each hotkey, Show / Hide and
-  Open settings, with a note beside the field when there is something to know
+  Open settings, with a note at the right end of the field's label row when
+  there is something to know
   (see [Hotkeys](#hotkeys)).
 - **Live preview**: the real widget renderer at the widget's true size, with
   sample values (it opens no counters). It follows the metric list, the order,
@@ -209,25 +210,32 @@ save.
 
 ## Temperature
 
-Windows has no vendor-neutral temperature interface for a normal user process.
-TinyMon reads the ACPI thermal zones that Windows publishes through PDH
-(`\Thermal Zone Information(*)\Temperature`), which needs no admin rights and
-no other software.
+Windows has no vendor-neutral CPU temperature interface for a normal user
+process. TinyMon reads two sources, neither of which needs admin rights or other
+software:
 
-- A zone is shown only once its reading has changed (by at least one kelvin,
-  the counter's step). Many desktop boards publish a firmware stub that reads
-  the same value at any load, and a reading that never moves says nothing.
-  Once a zone has moved it stays shown until TinyMon exits, also after a change
-  in Settings.
-- The labels say what is read: `ACPI Temp` for a board's only zone, otherwise
-  `ACPI` and the zone's firmware name (`ACPI THRM`). A zone is never called
-  "CPU Temp": what it measures is up to the firmware.
-- With no zone to show, the metric keeps one `Temp n/a` row, so you can see it
-  is on. A real sensor that has not moved since TinyMon started reads `n/a`
-  until it first does; on many desktops it never shows a value. Readings
-  outside 1-150 °C are ignored.
-- Temperature is off by default. TinyMon does not read GPU temperatures, and it
-  does not use LibreHardwareMonitor.
+- **GPU temperatures**, the way Task Manager reads them (the adapter performance
+  data of D3DKMT, Windows 10 1803 or later). A GPU whose driver reports a
+  temperature, which most NVIDIA and AMD graphics cards do, gets a row once it
+  has: `GPU`, or `GPU` and its name when several GPUs report. Integrated GPUs
+  usually report none and get no row. The GPU rows come first.
+- **The ACPI thermal zones** that Windows publishes through PDH
+  (`\Thermal Zone Information(*)\Temperature`):
+
+  - A zone is shown only once its reading has changed (by at least one kelvin,
+    the counter's step). Many desktop boards publish a firmware stub that
+    reads the same value at any load, and a reading that never moves says
+    nothing. Once a zone has moved it stays shown until TinyMon exits, also
+    after a change in Settings.
+  - The labels say what is read: `ACPI Temp` for a board's only zone,
+    otherwise `ACPI` and the zone's firmware name (`ACPI THRM`). A zone is
+    never called "CPU Temp": what it measures is up to the firmware.
+
+With nothing to show, the metric keeps one `Temp n/a` row, so you can see it is
+on; on many desktops without a dedicated graphics card that is all it shows. A
+shown GPU or zone that misses a reading reads `n/a` for that moment, so the
+widget keeps its size. Readings outside 1-150 °C are ignored. Temperature is
+off by default, and TinyMon does not use LibreHardwareMonitor.
 
 The metric is behind the `temp` Cargo feature, which is on by default; a build
 with `--no-default-features` has no Temperature metric and no `temp` token.
@@ -295,7 +303,7 @@ failed save is not reported.
 An annotated example:
 
 ```ini
-x=100                     # window position (set automatically on move)
+x=100                     # the widget's home (set when you drag it)
 y=24
 metrics=cpu,ram,gpu       # which metrics to show, in order
 opacity=220               # 40–255
@@ -309,9 +317,9 @@ hotkey_settings=Ctrl+Alt+S
 |---|---|---|
 | `x`, `y` | the widget's home: its top-left corner in desktop pixels (negative on a monitor left of or above the primary one) | whole numbers; both are needed; written on the first run and whenever home changes |
 | `metrics` | the enabled metrics, in display order | `cpu`, `ram`, `gpu`, `vram`, `percpu`, `disk`, `net`, `uptime`, `battery`, `temp`, separated by commas (`cpu,ram,gpu`). Unknown tokens are ignored and a repeated one counts once; `metrics=` with nothing hides every metric; a file without `metrics` gets the default |
-| `opacity` | how opaque the widget is | 40-255 (220); a lower number reads as 40 |
-| `interval_ms` | the update interval, in ms | 250-10000 (1000); out-of-range numbers are clamped |
-| `font_px` | the font size, in px; the widget scales with it | 9-16 (13); out-of-range numbers are clamped |
+| `opacity` | how opaque the widget is | 40-255 (220); 0-39 reads as 40; a value that is not a number from 0 to 255 gets the default |
+| `interval_ms` | the update interval, in ms | 250-10000 (1000); other whole numbers from 0 up are clamped; a negative value or one that is not a number gets the default |
+| `font_px` | the font size, in px; the widget scales with it | 9-16 (13); other whole numbers are clamped; a value that is not a whole number gets the default |
 | `hotkey_toggle` | the Show / Hide hotkey | a combo (none); see [Hotkeys](#hotkeys) |
 | `hotkey_settings` | the Open settings hotkey | a combo (none) |
 | `light` | the light widget theme | `true` or `false` (`false`); anything else reads as `false` |
@@ -375,8 +383,8 @@ cargo build --release --no-default-features  # without it
 
 The exe is `target\release\tinymon.exe`. Copy it anywhere and run it.
 
-Sizes with Rust 1.96 and MSVC 14.51: **280,576 bytes** (274 KiB) for the
-default build and 278,016 bytes without default features. The release profile
+Sizes with Rust 1.96 and MSVC 14.51: **286,208 bytes** (279.5 KiB) for the
+default build and 281,088 bytes without default features. The release profile
 optimises for size (`opt-level = "z"`, LTO, one codegen unit,
 `panic = "abort"`, stripped).
 
@@ -432,8 +440,8 @@ The exe is not code-signed, so on a first run Windows SmartScreen may show
 ## Tests
 
 ```sh
-cargo test                          # 232 tests, 2 diagnostics ignored
-cargo test --no-default-features    # 220 tests, 2 diagnostics ignored
+cargo test                          # 250 tests, 2 diagnostics ignored
+cargo test --no-default-features    # 231 tests, 2 diagnostics ignored
 cargo test -- --ignored --nocapture dump_   # print the detected GPUs and GPU engines
 ```
 
@@ -494,7 +502,8 @@ src/
   disk.rs           disk read and write
   net.rs            network up and down
   battery.rs        battery
-  temp.rs           ACPI thermal zones (feature "temp")
+  temp.rs           the Temperature metric: GPU sensors, ACPI thermal zones (feature "temp")
+  gputemp.rs        GPU temperatures through D3DKMT (feature "temp")
   fps.rs            why there is no FPS metric (documentation only)
 ```
 

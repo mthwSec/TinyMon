@@ -173,7 +173,7 @@ fn vram_total(uma: bool, dedicated: u64, shared_system: u64) -> u64 {
 
 /// Memory in use by the same rule: dedicated usage for a discrete adapter,
 /// dedicated + shared usage for a UMA one. Shared usage is almost all of a UMA
-/// adapter's figure (on the Intel adapters measured; an AMD APU may fill its
+/// adapter's figure (on the Intel adapter measured; an AMD APU may fill its
 /// dedicated carve-out first), so without it the reading is `None`, not a
 /// misleading 0; an unknown dedicated part counts as 0.
 fn vram_used(uma: bool, dedicated: Option<u64>, shared: Option<u64>) -> Option<u64> {
