@@ -486,12 +486,6 @@ fn focus_target(saved: i32) -> i32 {
     }
 }
 
-/// The move an up (`up`) or down arrow in metric row `row` of `len` makes:
-/// Some((from, to)), the rows the item leaves and lands in, or None at either
-/// end. The focus then goes to the same arrow in row `to`, so the next press
-/// moves the same item on. `double` is a double-click's BN_DOUBLECLICKED,
-/// which the clicked arrow sends after its first click has already moved the
-/// item one row: the item moves on from there, two rows in all.
 /// Flip metric `p` of the working list on or off. A row past the list's end
 /// (a stray message after WM_DESTROY emptied the list) does nothing.
 fn toggle_metric(state: &mut [(MetricKey, bool)], p: usize) {
@@ -500,6 +494,13 @@ fn toggle_metric(state: &mut [(MetricKey, bool)], p: usize) {
     }
 }
 
+/// The move an up (`up`) or down arrow in metric row `row` of `len` makes:
+/// Some((from, to)), the rows the item leaves and lands in, both inside the
+/// list, or None at either end. The focus then goes to the same arrow in row
+/// `to`, so the next press moves the same item on. `double` is a
+/// double-click's BN_DOUBLECLICKED, which the clicked arrow sends after its
+/// first click has already moved the item one row: the item moves on from
+/// there, two rows in all.
 fn reorder_step(len: usize, row: usize, up: bool, double: bool) -> Option<(usize, usize)> {
     let from = match (double, up) {
         (false, _) => row,
@@ -507,7 +508,7 @@ fn reorder_step(len: usize, row: usize, up: bool, double: bool) -> Option<(usize
         (true, false) => row + 1,
     };
     let to = if up { from.checked_sub(1)? } else { from + 1 };
-    (to < len).then_some((from, to))
+    (from.max(to) < len).then_some((from, to))
 }
 
 /// The settings window's procedure. The `unsafe extern "system"` signature is
@@ -1853,6 +1854,9 @@ mod tests {
         assert_eq!(reorder_step(10, 3, false, false), Some((3, 4)));
         // Nothing moves past either end.
         assert_eq!(reorder_step(10, 0, true, false), None);
+        // A row past the list's end moves nothing (only a stray message could
+        // name one).
+        assert_eq!(reorder_step(3, 3, true, false), None);
         assert_eq!(reorder_step(10, 9, false, false), None);
         // A double-click's BN_DOUBLECLICKED comes from the same arrow after its
         // first click has moved the item one row: the item moves on from there.

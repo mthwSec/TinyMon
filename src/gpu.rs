@@ -73,20 +73,23 @@ impl Adapters {
     }
 }
 
-/// Number the names that occur more than once, in order ("GPU 1", "GPU 2"),
-/// so that two adapters with one short name keep apart in their row labels.
+/// Number the names that occur more than once, in DXGI's order ("GPU 1",
+/// "GPU 2"), so that adapters with one short name keep apart in their row
+/// labels.
 fn number_duplicates(names: &mut [String]) {
     for i in 0..names.len() {
         if names.iter().filter(|n| **n == names[i]).count() < 2 {
             continue;
         }
         let name = names[i].clone();
-        let mut k = b'0';
-        for n in names.iter_mut().filter(|n| **n == name) {
-            // One digit: no machine has ten adapters of one name.
-            k = (k + 1).min(b'9');
+        for (k, n) in names.iter_mut().filter(|n| **n == name).enumerate() {
+            // The number's digits by hand: to_string costs about 1 KiB.
+            let k = k as u32 + 1;
             n.push(' ');
-            n.push(char::from(k));
+            if k >= 10 {
+                n.push(char::from_digit(k / 10 % 10, 10).unwrap_or('9'));
+            }
+            n.push(char::from_digit(k % 10, 10).unwrap_or('0'));
         }
     }
 }

@@ -117,17 +117,20 @@ fn pick_nics(rows: &[(u8, IfOctets)]) -> Option<Vec<IfOctets>> {
 }
 
 /// Octets moved between two reads, (in, out), summed over the interfaces
-/// present in both, and the interfaces whose counter went back in this read.
-/// An interface that appeared, or whose counter went back (a reset, or a
-/// momentary 0), adds 0 instead of a spike, and so does one in `held`, whose
-/// counter went back in the read before: after a momentary 0 the counter
-/// returns to its old value, which would otherwise count as one huge delta.
+/// present in both, and the interfaces to hold for the next read: those whose
+/// counter went back in this read, and held ones that still read 0. An
+/// interface that appeared, or whose counter went back (a reset, or a
+/// momentary 0), adds 0 instead of a spike, and so does one in `held`: after
+/// a dip to 0, however many reads it lasts, the counter returns to its old
+/// value, which would otherwise count as one huge delta.
 fn octet_delta(prev: &[IfOctets], cur: &[IfOctets], held: &[u64]) -> ((u64, u64), Vec<u64>) {
     let mut sum = (0u64, 0u64);
     let mut back = Vec::new();
     for &(luid, rx, tx) in cur {
         let Some(&(_, prx, ptx)) = prev.iter().find(|p| p.0 == luid) else { continue };
-        if rx < prx || tx < ptx {
+        // Held again while it still reads 0 after going back: a dip can last
+        // more than one read.
+        if rx < prx || tx < ptx || (held.contains(&luid) && rx == 0 && tx == 0) {
             back.push(luid);
         }
         if held.contains(&luid) {
@@ -230,6 +233,18 @@ mod tests {
         let (next, _) =
             octet_delta(&[(1, big + 500, big + 70)], &[(1, big + 800, big + 90)], &held);
         assert_eq!(next, (300, 20));
+    }
+
+    #[test]
+    fn delta_holds_an_interface_while_its_counter_reads_zero() {
+        // A dip that lasts two reads (a Wi-Fi reconnect): the interface stays
+        // held while it reads 0, so its return is no spike either.
+        let big = 500_000_000_000u64;
+        let (_, held) = octet_delta(&[(1, big, big)], &[(1, 0, 0)], &[]);
+        let (still, held) = octet_delta(&[(1, 0, 0)], &[(1, 0, 0)], &held);
+        assert_eq!((still, held.as_slice()), ((0, 0), &[1u64][..]));
+        let (back, held) = octet_delta(&[(1, 0, 0)], &[(1, big + 500, big + 70)], &held);
+        assert_eq!((back, held.len()), ((0, 0), 0));
     }
 
     #[test]

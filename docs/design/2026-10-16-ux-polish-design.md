@@ -64,3 +64,11 @@ These are the open wording items of the follow-up inbox sections H and I. They a
 - Deviation from 2.6: a trailing "GPU" word is dropped only before a parenthesised part ("140V GPU (16GB)"). This way an unknown name such as "Some Custom GPU" keeps it, as an existing test requires.
 - `place_widget` itself skips while a drag is in progress, which covers all of its callers.
 - `scripts/build-release.ps1`'s default size stop is 286,720 B.
+- Review fixes, after an independent review of the branch:
+  - A GPU that has reported stays shown across a re-detection or a metric Apply (`PROVEN_GPUS`, like `PROVEN_ZONES`).
+  - A network interface stays held while its counter keeps reading 0, so a dip of several reads makes no spike either.
+  - `reorder_step` checks both rows against the list.
+  - The README says that a sleeping laptop GPU reads n/a.
+  - Building the temperature rows straight into the output, and writing the duplicate numbers by hand, brought the release exe down to 285,184 B (281,088 B without default features), 1,536 B under the stop.
+  - Tests: 252 passed with 2 ignored, and 232 with 2 without default features.
+- Not checked on this hardware: whether polling a sleeping laptop GPU (hybrid graphics) wakes it. The evidence (Task Manager polls the same query at 1 Hz) says it does not, so on battery the row reads n/a. This needs a check on a hybrid laptop.

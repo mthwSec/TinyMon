@@ -2,7 +2,7 @@
 
 A tiny always-on-top Windows resource monitor, written in pure Rust and Win32:
 no Electron, no webview, no .NET, no scripting runtime. One small `.exe`
-(about 280 KiB, nothing to install) shows the metrics you pick in a
+(about 279 KiB, nothing to install) shows the metrics you pick in a
 borderless, semi-transparent widget, with a tray icon, two optional global
 hotkeys and a native settings window with a live preview.
 
@@ -117,7 +117,7 @@ say), home stays where it was, so every launch starts from the same spot; a
 widget that grew this way goes back to home's top-left when the screen layout
 changes.
 
-**One TinyMon at a time.** One TinyMon runs per signed-in user: starting
+**One TinyMon at a time.** One TinyMon runs per logon session: starting
 TinyMon again, from any copy, brings the running widget back (shown, at home,
 with its tray icon) and the new launch ends. So two portable copies in different folders cannot run at the same
 time. A launch at normal rights next to a TinyMon that runs as administrator
@@ -215,10 +215,12 @@ process. TinyMon reads two sources, neither of which needs admin rights or other
 software:
 
 - **GPU temperatures**, the way Task Manager reads them (the adapter performance
-  data of D3DKMT, Windows 10 1803 or later). A GPU whose driver reports a
-  temperature, which most NVIDIA and AMD graphics cards do, gets a row once it
-  has: `GPU`, or `GPU` and its name when several GPUs report. Integrated GPUs
-  usually report none and get no row. The GPU rows come first.
+  data of D3DKMT; Task Manager shows it from Windows 10 2004 on, for
+  dedicated GPUs). A GPU whose driver reports a temperature, which most NVIDIA
+  and AMD graphics cards do, gets a row once it has: `GPU`, or `GPU` and its
+  name when several GPUs report. Integrated GPUs usually report none and get
+  no row. A laptop's dedicated GPU that sleeps to save power reports none while
+  it sleeps, so its row reads `n/a` then. The GPU rows come first.
 - **The ACPI thermal zones** that Windows publishes through PDH
   (`\Thermal Zone Information(*)\Temperature`):
 
@@ -345,6 +347,10 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run    TinyMon = "<full path of t
   quotes, and clears Task Manager's disabled flag. That also repairs an entry
   left by an exe that has moved, one written by another copy, and one disabled
   in Task Manager. Clicking a checked item deletes the Run value.
+- An unquoted path that contains a space (`C:\Program Files\...`, as earlier
+  versions wrote it) shows unchecked, although Windows still starts it:
+  unquoted, Windows could start another program instead. One click rewrites it
+  in quotes.
 
 ## Requirements
 
@@ -383,7 +389,7 @@ cargo build --release --no-default-features  # without it
 
 The exe is `target\release\tinymon.exe`. Copy it anywhere and run it.
 
-Sizes with Rust 1.96 and MSVC 14.51: **286,208 bytes** (279.5 KiB) for the
+Sizes with Rust 1.96 and MSVC 14.51: **285,184 bytes** (278.5 KiB) for the
 default build and 281,088 bytes without default features. The release profile
 optimises for size (`opt-level = "z"`, LTO, one codegen unit,
 `panic = "abort"`, stripped).
@@ -440,8 +446,8 @@ The exe is not code-signed, so on a first run Windows SmartScreen may show
 ## Tests
 
 ```sh
-cargo test                          # 250 tests, 2 diagnostics ignored
-cargo test --no-default-features    # 231 tests, 2 diagnostics ignored
+cargo test                          # 252 tests, 2 diagnostics ignored
+cargo test --no-default-features    # 232 tests, 2 diagnostics ignored
 cargo test -- --ignored --nocapture dump_   # print the detected GPUs and GPU engines
 ```
 

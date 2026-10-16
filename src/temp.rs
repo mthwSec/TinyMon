@@ -30,6 +30,11 @@ thread_local! {
     /// metric Apply rebuilds the source with an empty zone list; without this
     /// list a real sensor would be hidden again until it moved once more.
     static PROVEN_ZONES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// The GPUs (by LUID) that have reported a temperature in this process,
+    /// for the same reason: a metric Apply or a re-detection of the adapters
+    /// builds the GPU sensors again, and a GPU that does not report on that
+    /// tick (a sleeping laptop GPU) would drop its row and resize the widget.
+    static PROVEN_GPUS: RefCell<Vec<LUID>> = const { RefCell::new(Vec::new()) };
 }
 
 pub struct TempSource {
@@ -61,10 +66,12 @@ impl TempSource {
         if self.adapters.refresh() {
             self.gpus = gpu_sensors(&self.adapters);
         }
-        for g in self.gpus.iter_mut() {
-            let reading = gputemp::read(g.luid);
-            note_gpu_reading(g, reading);
-        }
+        PROVEN_GPUS.with(|p| {
+            let mut proven = p.borrow_mut();
+            for g in self.gpus.iter_mut() {
+                note_gpu_reading(g, gputemp::read(g.luid), &mut proven);
+            }
+        });
     }
 
     pub fn rows(&self, out: &mut Vec<Row>) {
@@ -77,39 +84,36 @@ struct GpuTemp {
     /// The adapter's short name ("RTX 4080").
     name: String,
     luid: LUID,
-    /// Shown: the driver has reported a plausible temperature since the source
-    /// was built. Never resets.
+    /// Shown: the driver has reported a plausible temperature in this
+    /// process (`PROVEN_GPUS`). Never resets.
     live: bool,
     /// The last sample's reading in degrees Celsius; None without one.
     now: Option<f64>,
 }
 
-impl GpuTemp {
-    fn new(name: &str, luid: LUID) -> Self {
-        GpuTemp { name: name.to_string(), luid, live: false, now: None }
-    }
+/// The sensor of the GPU `name` with this LUID: shown at once if it is in
+/// `proven`, the GPUs that have reported earlier in the process.
+fn sensor(name: &str, luid: LUID, proven: &[LUID]) -> GpuTemp {
+    GpuTemp { name: name.to_string(), luid, live: proven.contains(&luid), now: None }
 }
 
-/// A sensor, not yet shown, for each of `adapters`.
+/// A sensor for each of `adapters`.
 fn gpu_sensors(adapters: &gpu::Adapters) -> Vec<GpuTemp> {
-    adapters.list.iter().map(|g| GpuTemp::new(&g.name, g.luid())).collect()
+    PROVEN_GPUS.with(|p| {
+        let proven = p.borrow();
+        adapters.list.iter().map(|g| sensor(&g.name, g.luid(), &proven)).collect()
+    })
 }
 
 /// Record one sample's reading of a GPU sensor: a plausible one makes it
-/// live, for good; a missing one leaves it without a current reading.
-fn note_gpu_reading(g: &mut GpuTemp, reading: Option<f64>) {
+/// live, for good, and joins `proven`; a missing one leaves it without a
+/// current reading.
+fn note_gpu_reading(g: &mut GpuTemp, reading: Option<f64>, proven: &mut Vec<LUID>) {
     g.now = reading;
-    g.live |= reading.is_some();
-}
-
-/// The shown GPU sensors as (label, degrees Celsius or None): "GPU" when one
-/// GPU has reported, else "GPU" and the adapter's name.
-fn gpu_rows(gpus: &[GpuTemp]) -> Vec<(String, Option<f64>)> {
-    let several = gpus.iter().filter(|g| g.live).count() > 1;
-    gpus.iter()
-        .filter(|g| g.live)
-        .map(|g| (if several { format!("GPU {}", g.name) } else { "GPU".into() }, g.now))
-        .collect()
+    if reading.is_some() && !g.live {
+        g.live = true;
+        proven.push(g.luid);
+    }
 }
 
 /// One thermal zone, followed across samples by its PDH instance name.
@@ -177,9 +181,8 @@ fn zone_label(instance: &str, several: bool) -> String {
 }
 
 /// The shown zones as (label, degrees Celsius or None), in the order first
-/// seen: every live zone, with None when it had no reading in the last sample.
-/// Every zone seen counts towards "several", so a real zone next to a hidden
-/// stub keeps its name.
+/// seen, the way build_rows shows them (tests only).
+#[cfg(test)]
 fn live_zone_rows(zones: &[Zone]) -> Vec<(String, Option<f64>)> {
     let several = zones.len() > 1;
     zones
@@ -189,21 +192,35 @@ fn live_zone_rows(zones: &[Zone]) -> Vec<(String, Option<f64>)> {
         .collect()
 }
 
-/// The metric's rows, all put together here: the GPU sensors' rows, then the
-/// shown zones' (a value-only n/a row for one without a current reading, so
-/// the row count stays stable), else one value-only "Temp n/a" row, so an
-/// enabled metric stays visible.
+/// The metric's rows, all put together here: one per shown GPU, "GPU" when
+/// one GPU has reported, else "GPU" and the adapter's name; then one per live
+/// zone, in the order first seen (every zone seen counts towards "several",
+/// so a real zone next to a hidden stub keeps its name). A sensor without a
+/// current reading gets a value-only n/a row, so the row count stays stable;
+/// with no sensor shown, one value-only "Temp n/a" row keeps an enabled
+/// metric visible.
 fn build_rows(gpus: &[GpuTemp], zones: &[Zone], out: &mut Vec<Row>) {
-    let rows: Vec<_> = gpu_rows(gpus).into_iter().chain(live_zone_rows(zones)).collect();
-    if rows.is_empty() {
+    let start = out.len();
+    let several_gpus = gpus.iter().filter(|g| g.live).count() > 1;
+    for g in gpus.iter().filter(|g| g.live) {
+        let label = if several_gpus { format!("GPU {}", g.name) } else { "GPU".into() };
+        push_temp(out, label, g.now);
+    }
+    let several_zones = zones.len() > 1;
+    for z in zones.iter().filter(|z| z.live) {
+        push_temp(out, zone_label(&z.name, several_zones), z.now.map(|k| k - 273.15));
+    }
+    if out.len() == start {
         out.push(Row::na("Temp"));
     }
-    for (label, celsius) in rows {
-        out.push(match celsius {
-            Some(c) => temp_row(&label, c),
-            None => Row::na(label),
-        });
-    }
+}
+
+/// A temperature row, or a value-only n/a row without a reading.
+fn push_temp(out: &mut Vec<Row>, label: String, celsius: Option<f64>) {
+    out.push(match celsius {
+        Some(c) => temp_row(&label, c),
+        None => Row::na(label),
+    });
 }
 
 pub fn temp_row(name: &str, celsius: f64) -> Row {
@@ -213,9 +230,10 @@ pub fn temp_row(name: &str, celsius: f64) -> Row {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_rows, live_zone_rows, note_gpu_reading, observe_zones, temp_row, zone_label, GpuTemp,
-        Zone,
+        build_rows, live_zone_rows, note_gpu_reading, observe_zones, sensor, temp_row, zone_label,
+        GpuTemp, Zone,
     };
+    use windows::Win32::Foundation::LUID;
 
     #[test]
     fn formats() {
@@ -250,11 +268,29 @@ mod tests {
 
     /// A GPU sensor after `readings`, one per tick.
     fn gpu(name: &str, readings: &[Option<f64>]) -> GpuTemp {
-        let mut g = GpuTemp::new(name, Default::default());
+        let mut g = sensor(name, Default::default(), &[]);
+        let mut proven = Vec::new();
         for r in readings {
-            note_gpu_reading(&mut g, *r);
+            note_gpu_reading(&mut g, *r, &mut proven);
         }
         g
+    }
+
+    #[test]
+    fn proven_gpu_stays_shown_after_a_rebuild() {
+        // A GPU that has reported keeps its row when the sensors are built
+        // again (adapters re-detected after a monitor change, or a metric
+        // Apply): n/a until it reports again, so the widget keeps its size.
+        let luid = LUID { LowPart: 7, HighPart: 0 };
+        let mut proven = Vec::new();
+        let mut g = sensor("RTX 4080", luid, &proven);
+        note_gpu_reading(&mut g, Some(50.0), &mut proven);
+        assert_eq!(proven, [luid]);
+        let rebuilt = sensor("RTX 4080", luid, &proven);
+        assert_eq!(shown_with(&[rebuilt], &[]), [row("GPU", "n/a", false)]);
+        // An adapter that never reported is not shown after a rebuild either.
+        let other = sensor("Intel UHD 730", LUID { LowPart: 9, HighPart: 0 }, &proven);
+        assert_eq!(shown_with(&[other], &[]), [row("Temp", "n/a", false)]);
     }
 
     fn row(label: &str, value: &str, bar: bool) -> (String, String, bool) {
