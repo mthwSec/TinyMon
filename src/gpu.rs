@@ -44,19 +44,44 @@ impl GpuAdapter {
     }
 }
 
-/// Enumerate all non-software GPUs: name, integrated or discrete, and memory
-/// total. Usage is not read here: DXGI's QueryVideoMemoryInfo reports only this
-/// process's own usage (about 0, TinyMon creates no device); `VramGroup` reads
-/// the adapter-wide figures from PDH instead.
-pub fn detect_gpus() -> Vec<GpuAdapter> {
+/// The detected adapters and the DXGI factory that listed them. The factory
+/// tells when the set of adapters has changed (a driver update, an eGPU
+/// plugged in or out); `refresh` then detects them again, so the GPU rows do
+/// not keep describing adapters that are gone.
+pub struct Adapters {
+    factory: Option<IDXGIFactory4>,
+    pub list: Vec<GpuAdapter>,
+}
+
+impl Adapters {
+    pub fn detect() -> Self {
+        // SAFETY: creates a DXGI factory; an error leaves no factory.
+        let factory: Option<IDXGIFactory4> = unsafe { CreateDXGIFactory1() }.ok();
+        let list = factory.as_ref().map(enumerate).unwrap_or_default();
+        Adapters { factory, list }
+    }
+
+    /// Detect the adapters again when the factory says the set has changed;
+    /// returns whether it did. Cheap enough for every tick.
+    pub fn refresh(&mut self) -> bool {
+        // SAFETY: IsCurrent on a live factory takes no arguments.
+        let changed = self.factory.as_ref().is_some_and(|f| !unsafe { f.IsCurrent() }.as_bool());
+        if changed {
+            *self = Adapters::detect();
+        }
+        changed
+    }
+}
+
+/// All non-software GPUs `factory` lists: name, integrated or discrete, and
+/// memory total. Usage is not read here: DXGI's QueryVideoMemoryInfo reports
+/// only this process's own usage (about 0, TinyMon creates no device);
+/// `VramGroup` reads the adapter-wide figures from PDH instead.
+fn enumerate(factory: &IDXGIFactory4) -> Vec<GpuAdapter> {
     let mut gpus = Vec::new();
     // SAFETY: DXGI COM calls. Every interface comes from a checked Result before
     // use, and enumeration stops at the first error (DXGI_ERROR_NOT_FOUND).
     unsafe {
-        let factory: IDXGIFactory4 = match CreateDXGIFactory1() {
-            Ok(f) => f,
-            Err(_) => return gpus,
-        };
         let mut index = 0u32;
         while let Ok(adapter) = factory.EnumAdapters1(index) {
             index += 1;
@@ -278,22 +303,32 @@ pub fn short_name(desc: &str) -> String {
 
 /// All detected GPUs plus their shared load sampler — one toggleable "group".
 pub struct GpuGroup {
-    gpus: Vec<GpuAdapter>,
-    load: GpuLoadSampler,
+    adapters: Adapters,
+    /// The engine counter, opened only while there is a hardware adapter.
+    load: Option<GpuLoadSampler>,
 }
 
 impl GpuGroup {
     pub fn new() -> Self {
-        GpuGroup { gpus: detect_gpus(), load: GpuLoadSampler::new() }
+        Self::from_adapters(Adapters::detect())
     }
-    /// Refresh GPU load for every adapter (once per tick).
+    fn from_adapters(adapters: Adapters) -> Self {
+        let load = (!adapters.list.is_empty()).then(GpuLoadSampler::new);
+        GpuGroup { adapters, load }
+    }
+    /// Refresh GPU load for every adapter (once per tick), after detecting the
+    /// adapters again if their set has changed.
     pub fn refresh(&mut self) {
-        self.load.update(&mut self.gpus);
+        self.adapters.refresh();
+        if self.adapters.list.is_empty() {
+            return;
+        }
+        self.load.get_or_insert_with(GpuLoadSampler::new).update(&mut self.adapters.list);
     }
     /// Append one utilization row per adapter, or one "GPU n/a" row when DXGI
     /// found none (`load_rows`).
     pub fn rows(&self, out: &mut Vec<Row>) {
-        load_rows(&self.gpus, out);
+        load_rows(&self.adapters.list, out);
     }
 }
 
@@ -303,7 +338,7 @@ impl GpuGroup {
 /// Memory" counters (instantaneous byte counts, valid on the first collect;
 /// Windows 10 1709 and later).
 pub struct VramGroup {
-    gpus: Vec<GpuAdapter>,
+    adapters: Adapters,
     dedicated: PdhCounter,
     shared: PdhCounter,
 }
@@ -311,26 +346,29 @@ pub struct VramGroup {
 impl VramGroup {
     pub fn new() -> Self {
         VramGroup {
-            gpus: detect_gpus(),
+            adapters: Adapters::detect(),
             dedicated: PdhCounter::new(w!("\\GPU Adapter Memory(*)\\Dedicated Usage")),
             shared: PdhCounter::new(w!("\\GPU Adapter Memory(*)\\Shared Usage")),
         }
     }
-    /// Read both counters once and update every adapter's usage (`vram_used`):
-    /// a missing counter, a failed collect or no instance of the adapter's LUID
-    /// is n/a, except that an integrated adapter's unknown dedicated part
-    /// counts as 0, so it shows its shared usage alone.
+    /// Read both counters once and update every adapter's usage (`vram_used`),
+    /// after detecting the adapters again if their set has changed. A discrete
+    /// adapter's usage is its dedicated usage, n/a when that counter cannot be
+    /// read or has no instance of the adapter's LUID; an integrated adapter's
+    /// is dedicated plus shared, n/a without the shared part (an unknown
+    /// dedicated part counts as 0).
     pub fn refresh(&mut self) {
+        self.adapters.refresh();
         let dedicated = self.dedicated.try_sample().unwrap_or_default();
         let shared = self.shared.try_sample().unwrap_or_default();
-        for g in self.gpus.iter_mut() {
+        for g in self.adapters.list.iter_mut() {
             let (d, s) =
                 (adapter_bytes(&dedicated, &g.luid_key), adapter_bytes(&shared, &g.luid_key));
             g.vram_used = vram_used(g.uma, d, s);
         }
     }
     pub fn rows(&self, out: &mut Vec<Row>) {
-        vram_rows(&self.gpus, out);
+        vram_rows(&self.adapters.list, out);
     }
 }
 
@@ -405,6 +443,29 @@ mod tests {
 
     const MIB: u64 = 1024 * 1024;
     const GIB: u64 = 1024 * MIB;
+
+    /// Reads the live system: with no driver update or eGPU change meanwhile,
+    /// the factory still describes the adapters, so nothing is detected again.
+    #[test]
+    fn unchanged_adapter_set_is_not_detected_again() {
+        let mut a = Adapters::detect();
+        let names: Vec<String> = a.list.iter().map(|g| g.name.clone()).collect();
+        assert!(!a.refresh());
+        assert_eq!(a.list.iter().map(|g| g.name.clone()).collect::<Vec<_>>(), names);
+    }
+
+    /// Without a hardware adapter (RDP, a VM with the Basic Render Driver
+    /// only) the GPU metric opens no engine counter and shows one n/a row.
+    #[test]
+    fn no_hardware_adapter_opens_no_engine_query() {
+        let mut g = GpuGroup::from_adapters(Adapters { factory: None, list: Vec::new() });
+        assert!(g.load.is_none());
+        g.refresh();
+        assert!(g.load.is_none());
+        let mut out = Vec::new();
+        g.rows(&mut out);
+        assert_eq!((out[0].label.as_str(), out[0].value.as_str()), ("GPU", "n/a"));
+    }
 
     /// An adapter with the iGPU's LUID (low part 0x109f8) and the given load.
     fn adapter(load: Option<f32>) -> GpuAdapter {
@@ -745,7 +806,7 @@ mod tests {
     fn dump_detected_gpus() {
         let mut vram = VramGroup::new();
         vram.refresh();
-        for g in &vram.gpus {
+        for g in &vram.adapters.list {
             println!(
                 "GPU: {:<16} uma={}  VRAM {:?} / {} MiB  key={}",
                 g.name,

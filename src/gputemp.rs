@@ -81,7 +81,7 @@ mod tests {
     /// reports none).
     #[test]
     fn real_adapters_read_a_plausible_temperature_or_none() {
-        for g in crate::gpu::detect_gpus() {
+        for g in crate::gpu::Adapters::detect().list {
             if let Some(c) = read(g.luid()) {
                 assert!((1.0..150.0).contains(&c), "{}: {c}", g.name);
             }

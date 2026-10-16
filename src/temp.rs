@@ -34,22 +34,29 @@ pub struct TempSource {
     /// Every zone with a plausible reading since the source was built, in the
     /// order first seen.
     zones: Vec<Zone>,
+    /// The hardware GPUs, detected again when their set changes.
+    adapters: gpu::Adapters,
     /// One sensor per hardware GPU, read through D3DKMT (`gputemp`).
     gpus: Vec<GpuTemp>,
 }
 
 impl TempSource {
     pub fn new() -> Self {
+        let adapters = gpu::Adapters::detect();
         TempSource {
             zone: PdhCounter::new(w!("\\Thermal Zone Information(*)\\Temperature")),
             zones: Vec::new(),
-            gpus: gpu::detect_gpus().iter().map(|g| GpuTemp::new(&g.name, g.luid())).collect(),
+            gpus: gpu_sensors(&adapters),
+            adapters,
         }
     }
 
     pub fn sample(&mut self) {
         let sample = self.zone.sample();
         PROVEN_ZONES.with(|p| observe_zones(&mut self.zones, &sample, &mut p.borrow_mut()));
+        if self.adapters.refresh() {
+            self.gpus = gpu_sensors(&self.adapters);
+        }
         for g in self.gpus.iter_mut() {
             let reading = gputemp::read(g.luid);
             note_gpu_reading(g, reading);
@@ -77,6 +84,11 @@ impl GpuTemp {
     fn new(name: &str, luid: LUID) -> Self {
         GpuTemp { name: name.to_string(), luid, live: false, now: None }
     }
+}
+
+/// A sensor, not yet shown, for each of `adapters`.
+fn gpu_sensors(adapters: &gpu::Adapters) -> Vec<GpuTemp> {
+    adapters.list.iter().map(|g| GpuTemp::new(&g.name, g.luid())).collect()
 }
 
 /// Record one sample's reading of a GPU sensor: a plausible one makes it
