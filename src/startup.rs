@@ -70,14 +70,18 @@ fn run_command(exe: &str) -> String {
 /// Whether the Run value `value` starts `exe`. The value is trimmed; the
 /// program is the text inside a leading pair of double quotes, as run_command
 /// writes it (anything after the closing quote is an argument), or else the
-/// whole value, the unquoted path that earlier versions wrote. Windows file
-/// names ignore case, and the comparison ignores the case of ASCII letters
-/// (such as a drive letter typed in lower case); a non-ASCII letter must match
-/// exactly, a rare miss that a click on the menu item repairs.
+/// whole value, the unquoted path that earlier versions wrote. An unquoted
+/// value with a space does not count: Windows could start another program
+/// from it (`C:\Program.exe` for `C:\Program Files\...`), so the menu shows the
+/// item off and one click writes the value quoted. Windows file names ignore
+/// case, and the comparison ignores the case of ASCII letters (such as a drive
+/// letter typed in lower case); a non-ASCII letter must match exactly, a rare
+/// miss that a click on the menu item repairs.
 fn launches(value: &str, exe: &str) -> bool {
     let value = value.trim();
     let program = match value.strip_prefix('"') {
         Some(quoted) => quoted.split_once('"').map_or(quoted, |(path, _)| path),
+        None if value.contains(' ') => return false,
         None => value,
     };
     // Byte by byte: str::eq_ignore_ascii_case adds about 0.4 KiB of code.
@@ -182,6 +186,20 @@ mod tests {
         assert!(!launches(r"D:\old\tinymon.exe", exe));
         // Another copy, with an argument after its quoted path.
         assert!(!launches(r#""C:\a\tinymon.exe" --flag"#, exe));
+        // This exe with an argument after its quoted path; an unclosed quote
+        // takes the rest of the value.
+        assert!(launches(r#""C:\b\tinymon.exe" --flag"#, exe));
+        assert!(launches(r#""C:\b\tinymon.exe"#, exe));
+    }
+
+    #[test]
+    fn unquoted_value_with_a_space_needs_repair() {
+        // Unquoted, "C:\Program Files\TinyMon\tinymon.exe" can start
+        // C:\Program.exe: such a value reads as off, so one click on the menu
+        // item writes it quoted.
+        let exe = r"C:\Program Files\TinyMon\tinymon.exe";
+        assert!(!launches(r"C:\Program Files\TinyMon\tinymon.exe", exe));
+        assert!(launches(r#""C:\Program Files\TinyMon\tinymon.exe""#, exe));
     }
 
     #[test]
@@ -191,6 +209,11 @@ mod tests {
         assert!(!approved_disabled(&[0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
         let disabled = [0x03, 0, 0, 0, 0x00, 0xA0, 0xC9, 0xB5, 0xE5, 0x57, 0xDD, 0x01];
         assert!(approved_disabled(&disabled));
+        // The low bit decides, as for the 06 (enabled) and 01 and 07
+        // (disabled) forms seen on other machines.
+        assert!(!approved_disabled(&[0x06]));
+        assert!(approved_disabled(&[0x01]));
+        assert!(approved_disabled(&[0x07]));
         // No data: nothing says disabled.
         assert!(!approved_disabled(&[]));
     }
