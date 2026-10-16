@@ -492,6 +492,14 @@ fn focus_target(saved: i32) -> i32 {
 /// moves the same item on. `double` is a double-click's BN_DOUBLECLICKED,
 /// which the clicked arrow sends after its first click has already moved the
 /// item one row: the item moves on from there, two rows in all.
+/// Flip metric `p` of the working list on or off. A row past the list's end
+/// (a stray message after WM_DESTROY emptied the list) does nothing.
+fn toggle_metric(state: &mut [(MetricKey, bool)], p: usize) {
+    if let Some(e) = state.get_mut(p) {
+        e.1 = !e.1;
+    }
+}
+
 fn reorder_step(len: usize, row: usize, up: bool, double: bool) -> Option<(usize, usize)> {
     let from = match (double, up) {
         (false, _) => row,
@@ -635,10 +643,7 @@ unsafe extern "system" fn settings_proc(
                 _ if (IDC_METRIC_BASE..IDC_METRIC_BASE + n).contains(&id) => {
                     // Toggle this row's metric on/off in the working list.
                     let p = (id - IDC_METRIC_BASE) as usize;
-                    METRIC_STATE.with(|st| {
-                        let mut s = st.borrow_mut();
-                        s[p].1 = !s[p].1;
-                    });
+                    METRIC_STATE.with(|st| toggle_metric(&mut st.borrow_mut(), p));
                     render_metric_rows(hwnd);
                     refresh_preview(hwnd);
                 }
@@ -650,7 +655,9 @@ unsafe extern "system" fn settings_proc(
                     let up = id < IDC_MOVEDN_BASE;
                     let base = if up { IDC_MOVEUP_BASE } else { IDC_MOVEDN_BASE };
                     let double = notif == BN_DOUBLECLICKED;
-                    let step = reorder_step(n as usize, (id - base) as usize, up, double);
+                    // The list's own length, so a swap cannot pass its end.
+                    let len = METRIC_STATE.with(|st| st.borrow().len());
+                    let step = reorder_step(len, (id - base) as usize, up, double);
                     if let Some((from, to)) = step {
                         METRIC_STATE.with(|st| st.borrow_mut().swap(from, to));
                         render_metric_rows(hwnd);
@@ -1825,6 +1832,17 @@ mod tests {
         ] {
             assert_eq!(enter_target(id), IDOK, "not a push button: {id}");
         }
+    }
+
+    #[test]
+    fn toggle_metric_ignores_a_row_past_the_end() {
+        let mut state = vec![(MetricKey::Cpu, true), (MetricKey::Ram, false)];
+        toggle_metric(&mut state, 1);
+        assert_eq!(state, [(MetricKey::Cpu, true), (MetricKey::Ram, true)]);
+        // A stray message after WM_DESTROY emptied the list: nothing happens.
+        toggle_metric(&mut [], 3);
+        toggle_metric(&mut state, 5);
+        assert_eq!(state.len(), 2);
     }
 
     #[test]

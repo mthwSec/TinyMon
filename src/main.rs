@@ -956,6 +956,15 @@ unsafe fn claim_single_instance() -> bool {
     // there already still reads ERROR_ALREADY_EXISTS.
     let last_error = GetLastError();
     if instance_action(mutex.is_ok(), last_error, cfg!(debug_assertions)) {
+        // A release build keeps the handle open on purpose, for the life of
+        // the process (HANDLE has no Drop; the OS closes it at exit). A debug
+        // build lets go of it, so that a debug copy cannot stop the next
+        // release launch.
+        if cfg!(debug_assertions) {
+            if let Ok(handle) = mutex {
+                let _ = CloseHandle(handle);
+            }
+        }
         return true;
     }
     if let Ok(running) = FindWindowW(CLASS_NAME, PCWSTR::null()) {
