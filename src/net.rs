@@ -32,21 +32,27 @@ pub struct NetSampler {
     up_bps: Option<f64>,
     /// Bytes per second received; `None` when the rate is unknown.
     down_bps: Option<f64>,
+    /// The interfaces whose counter went back in the last read (`octet_delta`).
+    held: Vec<u64>,
 }
 
 impl NetSampler {
     pub fn new() -> Self {
-        NetSampler { prev: snapshot(), up_bps: None, down_bps: None }
+        NetSampler { prev: snapshot(), up_bps: None, down_bps: None, held: Vec::new() }
     }
 
     pub fn sample(&mut self) {
         let cur = snapshot();
         let (down, up) = match (&self.prev, &cur) {
             (Some((t0, prev)), Some((t1, now))) => {
-                let (rx, tx) = octet_delta(prev, now);
+                let ((rx, tx), held) = octet_delta(prev, now, &self.held);
+                self.held = held;
                 (rate(rx, t1 - t0), rate(tx, t1 - t0))
             }
-            _ => (None, None),
+            _ => {
+                self.held.clear();
+                (None, None)
+            }
         };
         self.down_bps = down;
         self.up_bps = up;
@@ -111,17 +117,26 @@ fn pick_nics(rows: &[(u8, IfOctets)]) -> Option<Vec<IfOctets>> {
 }
 
 /// Octets moved between two reads, (in, out), summed over the interfaces
-/// present in both. An interface that appeared, or whose counter went back
-/// (a reset), adds 0 instead of a spike.
-fn octet_delta(prev: &[IfOctets], cur: &[IfOctets]) -> (u64, u64) {
+/// present in both, and the interfaces whose counter went back in this read.
+/// An interface that appeared, or whose counter went back (a reset, or a
+/// momentary 0), adds 0 instead of a spike, and so does one in `held`, whose
+/// counter went back in the read before: after a momentary 0 the counter
+/// returns to its old value, which would otherwise count as one huge delta.
+fn octet_delta(prev: &[IfOctets], cur: &[IfOctets], held: &[u64]) -> ((u64, u64), Vec<u64>) {
     let mut sum = (0u64, 0u64);
+    let mut back = Vec::new();
     for &(luid, rx, tx) in cur {
-        if let Some(&(_, prx, ptx)) = prev.iter().find(|p| p.0 == luid) {
-            sum.0 = sum.0.saturating_add(rx.saturating_sub(prx));
-            sum.1 = sum.1.saturating_add(tx.saturating_sub(ptx));
+        let Some(&(_, prx, ptx)) = prev.iter().find(|p| p.0 == luid) else { continue };
+        if rx < prx || tx < ptx {
+            back.push(luid);
         }
+        if held.contains(&luid) {
+            continue;
+        }
+        sum.0 = sum.0.saturating_add(rx.saturating_sub(prx));
+        sum.1 = sum.1.saturating_add(tx.saturating_sub(ptx));
     }
-    sum
+    (sum, back)
 }
 
 /// Bytes per second over `secs`; `None` without elapsed time.
@@ -192,7 +207,7 @@ mod tests {
     fn delta_sums_interfaces_seen_twice() {
         let prev = [(1, 100, 50), (2, 1000, 10)];
         let cur = [(1, 150, 80), (2, 1500, 10)];
-        assert_eq!(octet_delta(&prev, &cur), (550, 30));
+        assert_eq!(octet_delta(&prev, &cur, &[]).0, (550, 30));
     }
 
     #[test]
@@ -200,7 +215,21 @@ mod tests {
         // Interface 1's in-counter went back (a reset); interface 3 is new.
         let prev = [(1, 100, 50)];
         let cur = [(1, 90, 60), (3, 5000, 5000)];
-        assert_eq!(octet_delta(&prev, &cur), (0, 10));
+        assert_eq!(octet_delta(&prev, &cur, &[]), ((0, 10), vec![1]));
+    }
+
+    #[test]
+    fn delta_skips_the_tick_after_a_counter_steps_back() {
+        // A momentary 0 reading of a big counter: the tick of the dip adds 0,
+        // and so does the next, instead of the whole counter as one spike.
+        let big = 500_000_000_000u64;
+        let (dip, held) = octet_delta(&[(1, big, big)], &[(1, 0, 0)], &[]);
+        assert_eq!((dip, held.as_slice()), ((0, 0), &[1u64][..]));
+        let (back, held) = octet_delta(&[(1, 0, 0)], &[(1, big + 500, big + 70)], &held);
+        assert_eq!((back, held.len()), ((0, 0), 0));
+        let (next, _) =
+            octet_delta(&[(1, big + 500, big + 70)], &[(1, big + 800, big + 90)], &held);
+        assert_eq!(next, (300, 20));
     }
 
     #[test]
