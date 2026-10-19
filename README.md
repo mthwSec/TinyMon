@@ -439,10 +439,15 @@ To verify a download, compare `Get-FileHash <file>` with `SHA256SUMS.txt`
 `tinymon.exe` with the `sha256:` line of `BUILDINFO.txt`. If the GitHub CLI is
 installed, `gh attestation verify <file> --repo mthwSec/TinyMon` checks that
 the zip, or the exe from it, was built by this repository's release workflow.
-The same source built with `scripts\build-release.ps1` and the tools in
-`BUILDINFO.txt` gives the same `tinymon.exe`, byte for byte, whatever the user
-name or folder (a plain `cargo build` embeds the cargo home's path and gives
-other bytes).
+The same source built with `scripts\build-release.ps1` and the same tools gives
+the same `tinymon.exe`, byte for byte, whatever the user name or folder (a
+plain `cargo build` embeds the cargo home's path and gives other bytes). The
+tools are rustc, the Windows SDK and the exact linker build, which the
+`version:` line names (`linker 14.51.36260`); a serviced Visual Studio can hold
+a newer linker under the same toolset version, and another linker build gives
+other bytes. `scripts\build-release.ps1 -CheckOnly tinymon.exe` prints the
+linker build of any copy, including the 1.0.0 release, whose `BUILDINFO.txt`
+predates that line.
 
 The exe is not code-signed, so on a first run Windows SmartScreen may show
 "Windows protected your PC". Choose **More info**, then **Run anyway**.

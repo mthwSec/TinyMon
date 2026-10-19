@@ -124,6 +124,25 @@ function Read-Pe([byte[]]$b) {
         LinkerVersion = '{0}.{1}' -f $b[$opt + 2], $b[$opt + 3] }
 }
 
+# The linker's own build number from the Rich header (the tools that built the
+# image, XOR-encoded after the DOS stub); 0 without one. The toolset version
+# alone does not name it: a serviced toolset folder can hold a newer linker,
+# and another linker build lays the code out differently.
+function Get-LinkerBuild([byte[]]$b) {
+    $end = -1
+    for ($i = 0x40; $i -lt 0x400; $i++) {
+        if ($b[$i] -eq 0x52 -and $b[$i + 1] -eq 0x69 -and $b[$i + 2] -eq 0x63 -and $b[$i + 3] -eq 0x68) { $end = $i; break }
+    }
+    if ($end -lt 0) { return 0 }
+    $key = U32 $b ($end + 4)
+    for ($i = $end - 8; $i -ge 0x40; $i -= 8) {
+        $id = (U32 $b $i) -bxor $key
+        if (($id -shr 16) -eq 258) { return $id -band 0xFFFF }  # 258: the linker
+        if ($id -eq 0x536E6144) { break }                       # "DanS": the start
+    }
+    0
+}
+
 # The file offset of an RVA.
 function Get-Offset($pe, [uint32]$rva) {
     foreach ($s in $pe.Sections) {
@@ -263,7 +282,7 @@ function Test-Exe([string]$exe) {
     Say "size:     $size bytes"
     Say "sha256:   $sha"
     Say ("imports:  " + (($imports | Sort-Object -Unique) -join ', '))
-    Say "version:  $fileVersion; linker $($pe.LinkerVersion)"
+    Say "version:  $fileVersion; linker $($pe.LinkerVersion).$(Get-LinkerBuild $b)"
     $script:linker = $pe.LinkerVersion
     if ($fail.Count) {
         foreach ($f in $fail) { Say "FAIL: the exe $f" }
