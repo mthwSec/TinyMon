@@ -40,10 +40,10 @@ settings stay, and it leaves the Start with Windows entry as it is (the menu's
 **Uninstalling.** In Windows Settings, **Apps**, choose TinyMon, then
 **Uninstall**. The uninstaller closes TinyMon, removes its Start with Windows
 entry and asks whether to delete the settings too. By default it keeps them, so
-a later install starts where you left off. The setup and the uninstaller leave
-a TinyMon run from another folder, and its Start with Windows entry, alone. To
-remove the portable version, turn off **Start with Windows** in its menu,
-choose **Exit** and delete its folder.
+a later install starts where you left off. Neither the setup nor the
+uninstaller closes a TinyMon run from another folder, and the uninstaller
+leaves its Start with Windows entry alone. To remove the portable version, turn
+off **Start with Windows** in its menu, choose **Exit** and delete its folder.
 
 **Unattended.** `TinyMon-<version>-setup.exe /VERYSILENT` installs with the
 default options (`/MERGETASKS="!startup"` leaves out the sign-in entry) and
