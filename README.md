@@ -2,26 +2,62 @@
 
 A tiny always-on-top Windows resource monitor, written in pure Rust and Win32:
 no Electron, no webview, no .NET, no scripting runtime. One small `.exe`
-(about 279 KiB, nothing to install) shows the metrics you pick in a
-borderless, semi-transparent widget, with a tray icon, two optional global
-hotkeys and a native settings window with a live preview.
+(about 279 KiB) shows the metrics you pick in a borderless, semi-transparent
+widget, with a tray icon, two optional global hotkeys and a native settings
+window with a live preview. Install it with the setup, or run it from any
+folder without installing.
 
 ![The TinyMon widget with sample values: CPU, RAM, GPU, VRAM, network up and down, temperature and uptime rows, each with a sparkline](screenshots/widget.png)
 
-The parts of a row:
+## Download and install
 
-```text
-+------------------------------+
-| TinyMon                   +2 |   dim title; "+N" when rows do not fit the screen
-|------------------------------|
-| CPU                      37% |   accent-coloured label, value on the right
-| ___..--''''--..___..--''---. |   sparkline of the recent samples
-| RAM              58% 9.3/16G |
-| ______..--------------''''-- |
-| Intel UHD 730            12% |   one row per GPU
-| __..___..__________..--__... |
-+------------------------------+
-```
+Download TinyMon from the
+[latest release](https://github.com/mthwSec/TinyMon/releases/latest):
+
+- **Setup (recommended):** `TinyMon-<version>-setup.exe`. It installs TinyMon
+  for your user account only, so it needs no admin rights, into
+  `%LOCALAPPDATA%\Programs\TinyMon`, and adds it to the Start menu. Its
+  options: **Start TinyMon when I sign in** (on) and a desktop shortcut (off).
+  At the end it offers to start TinyMon and to open `README.txt`, a short user
+  guide.
+- **Portable:** `TinyMon-<version>-windows-x64.zip`. Extract it anywhere, a USB
+  stick too, and run `tinymon.exe`. Nothing is installed; the settings are saved
+  next to the exe (see [Configuration file](#configuration-file)). The zip
+  holds the same user guide.
+
+**First run.** TinyMon is not code-signed, so Windows SmartScreen may show
+"Windows protected your PC": choose **More info**, then **Run anyway**. Some
+antivirus programs flag it too; see
+[Antivirus note](#antivirus-note-false-positives). To check a download, see
+[Verifying a download](#verifying-a-download).
+
+**Updating.** Run the newer setup. It closes a running TinyMon the way the
+menu's **Exit** does, which saves the settings, replaces the files and starts
+TinyMon again. It never touches `tinymon.cfg`, so the settings stay, and it
+leaves the Start with Windows entry as it is (the menu's
+**Start with Windows** turns it on or off).
+
+**Uninstalling.** In Windows Settings, **Apps**, choose TinyMon, then
+**Uninstall**. The uninstaller closes TinyMon, removes the Start with Windows
+entry and asks whether to delete the settings too. By default it keeps them,
+so a later install starts where you left off. To remove the portable version,
+turn off **Start with Windows** in its menu, choose **Exit** and delete its
+folder.
+
+**Unattended.** `TinyMon-<version>-setup.exe /VERYSILENT` installs with the
+default options (`/MERGETASKS="!startup"` leaves out the sign-in entry) and
+starts TinyMon again only if it closed it. `unins000.exe /VERYSILENT`, in the
+install folder, uninstalls and keeps the settings; add `/DELETESETTINGS` to
+delete them.
+
+**Requirements.** Windows 10 version 1703 or later, or Windows 11, 64-bit. The
+DPI functions TinyMon uses are bound at load time, so an older Windows refuses
+to start the exe. The GPU memory rows need version 1709 (`n/a` before), and the
+settings window's dark title bar needs version 2004 (before that it keeps a
+light one). Nothing else to install: the Visual C++ runtime is linked into the
+exe, and the rest of the C runtime (the Universal CRT) is part of Windows 10,
+so no Visual C++ Redistributable is needed. TinyMon needs no admin rights (its
+manifest declares `asInvoker`), no services or drivers and no network access.
 
 ## Metrics
 
@@ -51,6 +87,21 @@ that fails, a desktop without a battery, or a machine without a hardware GPU
 (`GPU n/a`, `VRAM n/a`).
 
 ## The widget
+
+The parts of a row:
+
+```text
++------------------------------+
+| TinyMon                   +2 |   dim title; "+N" when rows do not fit the screen
+|------------------------------|
+| CPU                      37% |   accent-coloured label, value on the right
+| ___..--''''--..___..--''---. |   sparkline of the recent samples
+| RAM              58% 9.3/16G |
+| ______..--------------''''-- |
+| Intel UHD 730            12% |   one row per GPU
+| __..___..__________..--__... |
++------------------------------+
+```
 
 - **Rows.** Each row has the metric's accent-coloured label on the left (cut
   with an ellipsis when too long) and its value on the right, in one value
@@ -287,7 +338,8 @@ Everything is saved to `tinymon.cfg`, a small `key=value` text file.
 **Where.** Next to the `.exe` when that folder is writable (decided by a real
 test write), which makes TinyMon portable, for example on a USB stick.
 Otherwise in `%APPDATA%\TinyMon\tinymon.cfg` (a read-only stick, `C:\Program
-Files`).
+Files`). An installed TinyMon keeps it in the setup's folder,
+`%LOCALAPPDATA%\Programs\TinyMon`, which is writable.
 
 **Which file is read.** TinyMon looks for both files. A portable install reads
 its own file first; a `%APPDATA%` file then only seeds its first run. An install
@@ -355,22 +407,55 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run    TinyMon = "<full path of t
   versions wrote it) shows unchecked, although Windows still starts it:
   unquoted, Windows could start another program instead. One click rewrites it
   in quotes.
+- The setup's **Start TinyMon when I sign in** writes the same entry for the
+  installed exe, and the uninstaller deletes it. An upgrade leaves it as it
+  is.
 
-## Requirements
+## FPS: why it is not included
 
-To run:
+A per-application frame rate is a common request, but Windows offers no
+vendor-neutral, user-mode, no-admin way to measure a specific game's render
+rate, and every real approach gives up one of TinyMon's promises:
 
-- Windows 10 version 1703 or later, 64-bit. The DPI functions TinyMon uses are
-  bound at load time, so an older Windows refuses to start the exe. The GPU
-  memory rows need version 1709 (`n/a` before), and the settings window's dark
-  title bar needs version 2004 (before that it keeps a light one).
-- Nothing else to install. The Visual C++ runtime is linked into the exe, and
-  the rest of the C runtime (the Universal CRT) is part of Windows 10, so no
-  Visual C++ Redistributable is needed.
-- No admin rights, no services or drivers, no network access. The exe declares
-  `asInvoker` in its manifest.
+| Approach | Cost |
+|---|---|
+| **PresentMon / ETW** (how RTSS and CapFrameX work) | needs **Administrator** or the *Performance Log Users* group to open an ETW trace |
+| **Bundling PresentMon.exe** | **several MB** (about 20 times TinyMon) and a second binary; still needs ETW rights |
+| **Overlay injection** (Fraps or RTSS style) | **antivirus and anti-cheat tools flag it as malware**; fragile |
+| **`DwmGetCompositionTimingInfo`** | no admin and tiny, but it is the **desktop compositor's** rate (about the monitor's refresh rate), not a game's |
 
-To build:
+So FPS is deliberately left out. [`src/fps.rs`](src/fps.rs) records the
+reasoning and how a metric would plug in: behind a Cargo feature of its own,
+as `temp` is, using PresentMon/ETW, documented to need elevation, and never by
+injection.
+
+## Antivirus note (false positives)
+
+TinyMon is a small, **unsigned**, freshly compiled program that reads
+performance counters and writes a registry Run value, a profile some heuristic
+antivirus engines flag as a **false positive** (for example Symantec's
+`Heur.AdvML.B`, or Microsoft Defender). It does nothing malicious: no network
+access, and no files written outside its config's folder. If your antivirus
+quarantines it (a build fails with *"Access is denied. (os error 5)"*, or the
+`.exe` shows 0 KB or disappears), add a folder exclusion for the project or
+output folder, or restore it from quarantine. Signing the binary would avoid
+this for distribution.
+
+## Verifying a download
+
+`SHA256SUMS.txt` in each release holds the SHA-256 of the setup, the zip and
+`BUILDINFO.txt`: compare them with `Get-FileHash <file>`, or run
+`sha256sum -c --ignore-missing SHA256SUMS.txt` in the folder with the
+downloads. The `tinymon.exe` in the zip, and the one the setup installs, has
+the SHA-256 on the `sha256:` line of `BUILDINFO.txt`. If the GitHub CLI is
+installed, `gh attestation verify <file> --repo mthwSec/TinyMon` checks that
+the setup, the zip or the exe was built by this repository's release workflow.
+
+## Building from source
+
+The rest of this README is for building, testing and releasing TinyMon.
+
+### Requirements
 
 - **Rust 1.96.0** with the **MSVC** toolchain (`x86_64-pc-windows-msvc`).
   `rust-toolchain.toml` pins that version, and rustup installs it on first use.
@@ -384,7 +469,7 @@ To build:
 
 `cargo` finds the MSVC linker by itself; no developer command prompt is needed.
 
-## Build
+### Build
 
 ```sh
 cargo build --release                        # with the Temperature metric (default)
@@ -405,7 +490,17 @@ user (`asInvoker`), Windows 10 and 11, Per-Monitor-V2 DPI awareness. It also
 links the Visual C++ runtime statically while the Universal CRT stays a
 Windows DLL, and passes `/Brepro`, so that the same inputs give the same bytes.
 
-## Releases
+The setup is built with [Inno Setup](https://jrsoftware.org/isinfo.php) 7
+from the release exe:
+
+```powershell
+ISCC installer\tinymon.iss                           # target\installer\TinyMon-<version>-setup.exe
+ISCC /DSourceExe=path\to\tinymon.exe installer\tinymon.iss
+```
+
+Its version comes from the exe's version information, so from `Cargo.toml`.
+
+### Releases
 
 A release exe is built with the script that the release workflow runs. Windows
 blocks unsigned scripts by default, so run it through `powershell
@@ -426,19 +521,20 @@ Windows SDK).
 
 Releases are built by GitHub Actions (`.github/workflows/release.yml`) on a
 version tag: the exe is built twice, on two runners from two checkout paths,
-and is published only if both builds have the same bytes. A release holds:
+and is published only if both builds have the same bytes. The setup is then
+built from that exe with Inno Setup 7.1.0, which the workflow downloads from
+its GitHub release and checks against a pinned SHA-256. A release holds:
 
-- `TinyMon-<version>-windows-x64.zip`: `tinymon.exe`, this README and the two
-  license files;
+- `TinyMon-<version>-setup.exe`: the setup;
+- `TinyMon-<version>-windows-x64.zip`: `tinymon.exe`, the user guide
+  `README.txt` and the two license files;
 - `BUILDINFO.txt`: the SHA-256 of `tinymon.exe` and the tool versions the
   build used;
-- `SHA256SUMS.txt`: the SHA-256 of the zip and of `BUILDINFO.txt`.
+- `SHA256SUMS.txt`: the SHA-256 of the setup, the zip and `BUILDINFO.txt`.
 
-To verify a download, compare `Get-FileHash <file>` with `SHA256SUMS.txt`
-(`sha256sum -c SHA256SUMS.txt` in a folder with both files), and the extracted
-`tinymon.exe` with the `sha256:` line of `BUILDINFO.txt`. If the GitHub CLI is
-installed, `gh attestation verify <file> --repo mthwSec/TinyMon` checks that
-the zip, or the exe from it, was built by this repository's release workflow.
+The workflow attests the setup, the zip, `BUILDINFO.txt`, `SHA256SUMS.txt`
+and the exe ([Verifying a download](#verifying-a-download)).
+
 The same source built with `scripts\build-release.ps1` and the same tools gives
 the same `tinymon.exe`, byte for byte, whatever the user name or folder (a
 plain `cargo build` embeds the cargo home's path and gives other bytes). The
@@ -449,10 +545,11 @@ other bytes. `scripts\build-release.ps1 -CheckOnly tinymon.exe` prints the
 linker build of any copy, including the 1.0.0 release, whose `BUILDINFO.txt`
 predates that line.
 
-The exe is not code-signed, so on a first run Windows SmartScreen may show
-"Windows protected your PC". Choose **More info**, then **Run anyway**.
+The setup itself is not built to be reproducible byte for byte (it records
+its files' times); the exe it installs is, and `BUILDINFO.txt` names it.
+Neither is code-signed.
 
-## Tests
+### Tests
 
 ```sh
 cargo test                          # 252 tests; 3 ignored: 2 diagnostics, the README picture
@@ -470,7 +567,7 @@ with Windows matching. Some read the live system (PDH counters, DXGI, a
 message-only window, the embedded manifest). The config tests use fixed folders
 under `%TEMP%` (`tinymon_test_*`), so run one test suite at a time on a machine.
 
-## Project structure
+### Project structure
 
 ```text
 build.rs            compiles tinymon.rc; links the static VC++ runtime and /Brepro
@@ -479,15 +576,19 @@ tinymon.manifest    asInvoker, Windows 10/11, Per-Monitor-V2
 icon.ico            the exe's icon (resource 1)
 rust-toolchain.toml pins Rust 1.96.0
 rustfmt.toml        use_small_heuristics = "Max"
-.gitattributes      LF line endings; icon.ico is binary
+.gitattributes      LF line endings (CRLF for the user guide); icon.ico is binary
 LICENSE-MIT         the MIT license
 LICENSE-APACHE      the Apache License 2.0
+installer/
+  tinymon.iss       the setup (Inno Setup 7): per-user install, upgrade, uninstall
+  README.txt        the user guide, installed with TinyMon and in the zip
 scripts/
   build-release.ps1 the release build and its checks
 .github/workflows/
   ci.yml            fmt, clippy, tests and the release checks on every push
                     to main and every pull request
-  release.yml       the reproducible release build on a version tag
+  release.yml       the reproducible release build and the setup on a version
+                    tag
 docs/design/        the designs of the correctness pass, the portable exe and
                     the UX polish
 screenshots/        the README's picture (render_readme_picture renders it)
@@ -523,37 +624,7 @@ src/
   fps.rs            why there is no FPS metric (documentation only)
 ```
 
-## FPS: why it is not included
-
-A per-application frame rate is a common request, but Windows offers no
-vendor-neutral, user-mode, no-admin way to measure a specific game's render
-rate, and every real approach gives up one of TinyMon's promises:
-
-| Approach | Cost |
-|---|---|
-| **PresentMon / ETW** (how RTSS and CapFrameX work) | needs **Administrator** or the *Performance Log Users* group to open an ETW trace |
-| **Bundling PresentMon.exe** | **several MB** (about 20 times TinyMon) and a second binary; still needs ETW rights |
-| **Overlay injection** (Fraps or RTSS style) | **antivirus and anti-cheat tools flag it as malware**; fragile |
-| **`DwmGetCompositionTimingInfo`** | no admin and tiny, but it is the **desktop compositor's** rate (about the monitor's refresh rate), not a game's |
-
-So FPS is deliberately left out. [`src/fps.rs`](src/fps.rs) records the
-reasoning and how a metric would plug in: behind a Cargo feature of its own,
-as `temp` is, using PresentMon/ETW, documented to need elevation, and never by
-injection.
-
-## Antivirus note (false positives)
-
-TinyMon is a small, **unsigned**, freshly compiled program that reads
-performance counters and writes a registry Run value, a profile some heuristic
-antivirus engines flag as a **false positive** (for example Symantec's
-`Heur.AdvML.B`, or Microsoft Defender). It does nothing malicious: no network
-access, and no files written outside its config's folder. If your antivirus
-quarantines it (a build fails with *"Access is denied. (os error 5)"*, or the
-`.exe` shows 0 KB or disappears), add a folder exclusion for the project or
-output folder, or restore it from quarantine. Signing the binary would avoid
-this for distribution.
-
-## Implementation notes
+### Implementation notes
 
 - Pure Rust and the [`windows`](https://crates.io/crates/windows) crate
   (0.62.2), the only dependency, with only the crate features TinyMon uses.
