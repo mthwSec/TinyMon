@@ -3,7 +3,8 @@ TinyMon - user guide
 
 TinyMon is a small always-on-top window, the widget, that shows how busy your
 PC is: the processor, memory, graphics, disk, network and more, each with a
-line of its last minute. It needs no admin rights and almost no resources.
+line of its recent readings. It needs no admin rights and almost no
+resources.
 
 The full manual, new versions and the source code:
 https://github.com/mthwSec/TinyMon
@@ -12,9 +13,10 @@ https://github.com/mthwSec/TinyMon
 Starting and quitting
 ---------------------
 
-- Start TinyMon from the Start menu. The first time, the widget appears in the
-  top-right corner of the main screen, and TinyMon's icon appears in the
-  notification area (the tray, next to the clock).
+- Start TinyMon from the Start menu, or run tinymon.exe from the zip. The
+  first time, the widget appears in the top-right corner of the main screen,
+  and TinyMon's icon appears in the notification area (the tray, next to the
+  clock).
 - Only one TinyMon runs at a time: starting it again brings the widget back.
 - To quit, right-click the widget or the tray icon and choose Exit. Esc and
   Alt+F4 only hide the widget; TinyMon keeps running in the tray.
@@ -53,7 +55,8 @@ What the rows mean
   Bat        battery charge and the time left, or "chg" while charging
   Temp       temperatures, see below
 
-- The line under a value shows its last minute or so.
+- The line under a value shows its last 64 readings, about a minute at the
+  default update interval.
 - The labels of CPU, RAM, GPU, VRAM, the cores and Temp turn red at 90% or
   more (90 degrees C for a temperature).
 - "n/a" means this PC does not give that reading. "..." means TinyMon is
@@ -100,9 +103,9 @@ Temperature is off at first; turn it on in Settings.
 Starting with Windows
 ---------------------
 
-Setup asks whether TinyMon should start when you sign in (it is ticked by
-default). You can change it at any time with the menu's Start with Windows,
-or in Task Manager's Startup tab.
+On a first install, Setup asks whether TinyMon should start when you sign in
+(it is ticked by default). You can change it at any time with the menu's
+Start with Windows, or in Task Manager's Startup tab.
 
 
 Where the settings are kept
@@ -120,6 +123,9 @@ Updating
 
 Download the new setup from the website and run it. It closes TinyMon,
 replaces it, keeps your settings and can start it again at the end.
+
+With the zip, quit TinyMon (menu, Exit) and put the new tinymon.exe in place
+of the old one; the settings stay.
 
 
 Uninstalling
@@ -145,8 +151,9 @@ TinyMon is not signed with a certificate, so Windows SmartScreen may say
 "Windows protected your PC". Choose More info, then Run anyway.
 
 Some antivirus programs flag small unsigned programs like TinyMon by mistake.
-TinyMon makes no network connections, and the only things it writes are its
-settings file and, if you turn it on, the Start with Windows entry.
+TinyMon makes no network connections and writes no files outside its
+settings folder; the only other thing it changes is the Start with Windows
+entry, if you turn it on.
 
 
 Requirements

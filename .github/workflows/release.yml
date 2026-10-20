@@ -1,8 +1,9 @@
 # Builds a release. On a v* tag the exe is built twice, on two runners from
 # two checkout paths, and released only when both builds have the same bytes;
-# the setup and the zip are made from that exe. Run by hand (workflow_dispatch), it is a dry run: it builds, checks and
-# packages, keeps the result as a workflow artifact and publishes nothing;
-# only the release job, which runs for a tag alone, can write to the repo.
+# the setup and the zip are made from that exe. Run by hand
+# (workflow_dispatch), it is a dry run: it builds, checks and packages, keeps
+# the result as a workflow artifact and publishes nothing; only the release
+# job, which runs for a tag alone, can write to the repo.
 name: Release
 
 on:
@@ -101,7 +102,7 @@ jobs:
           INNO_SHA256: 0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f
         run: |
           $inno = Join-Path $env:RUNNER_TEMP 'innosetup.exe'
-          curl.exe -sSfL -o $inno $env:INNO_URL
+          curl.exe -sSfL --retry 3 -o $inno $env:INNO_URL
           if ($LASTEXITCODE -ne 0) { throw 'downloading Inno Setup failed' }
           $hash = (Get-FileHash $inno -Algorithm SHA256).Hash.ToLower()
           if ($hash -ne $env:INNO_SHA256) { throw "Inno Setup has SHA-256 $hash, not the pinned one" }

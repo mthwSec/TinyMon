@@ -33,7 +33,8 @@ AppSupportURL=https://github.com/mthwSec/TinyMon/issues
 AppUpdatesURL=https://github.com/mthwSec/TinyMon/releases
 AppCopyright=Copyright (C) 2026 mthwSec
 VersionInfoDescription=TinyMon Setup
-VersionInfoVersion={#AppVersion}
+; Numbers only, which a pre-release version such as 1.2.0-rc.1 is not.
+VersionInfoVersion={#GetVersionNumbersString(SourceExe)}
 ; Per user: no UAC prompt, and {autopf} is %LOCALAPPDATA%\Programs.
 PrivilegesRequired=lowest
 DefaultDirName={autopf}\TinyMon
@@ -79,10 +80,10 @@ Name: "{autodesktop}\TinyMon"; Filename: "{app}\tinymon.exe"; Comment: "Tiny alw
 
 [Run]
 ; The last page offers to start TinyMon and to open the guide. A silent
-; install starts TinyMon again only if it closed a running one.
-Filename: "{app}\tinymon.exe"; Description: "{cm:LaunchProgram,TinyMon}"; Flags: nowait postinstall skipifsilent
+; install starts TinyMon again only if it closed it.
+Filename: "{code:LaunchFile}"; Parameters: "{code:LaunchParams}"; Description: "{cm:LaunchProgram,TinyMon}"; Flags: nowait postinstall skipifsilent
 Filename: "{app}\README.txt"; Description: "{cm:ViewGuide}"; Flags: shellexec nowait postinstall skipifsilent unchecked
-Filename: "{app}\tinymon.exe"; Flags: nowait; Check: RestartAfterSilentInstall
+Filename: "{code:LaunchFile}"; Parameters: "{code:LaunchParams}"; Flags: nowait; Check: RestartAfterSilentInstall
 
 [UninstallDelete]
 ; Left behind only when TinyMon stopped in the middle of saving its settings
@@ -97,6 +98,7 @@ const
   ID_EXIT = 3;
   { Held by a running TinyMon until its process ends (src/main.rs). }
   InstanceMutex = 'Local\TinyMon.Instance';
+  PROCESS_QUERY_LIMITED_INFORMATION = $1000;
   UninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{{#AppGuid}}_is1';
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
   ApprovedKey = 'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run';
@@ -106,20 +108,66 @@ var
   ClosedTinyMon: Boolean;
   DeleteSettings: Boolean;
 
-{ Ask a running TinyMon to exit the way its menu's Exit does, and wait up to
-  ten seconds for its process to end. True when one ran and has ended. A
-  TinyMon that runs as administrator takes no messages from Setup; Windows
-  then reports tinymon.exe in use if it is the one being replaced. }
+function WinGetWindowThreadProcessId(Wnd: HWND; var ProcessId: DWORD): DWORD;
+  external 'GetWindowThreadProcessId@user32.dll stdcall';
+function WinOpenProcess(Access: DWORD; Inherit: Integer; ProcessId: DWORD): THandle;
+  external 'OpenProcess@kernel32.dll stdcall';
+function WinQueryFullProcessImageName(Process: THandle; Flags: DWORD; ExeName: String; var Size: DWORD): Integer;
+  external 'QueryFullProcessImageNameW@kernel32.dll stdcall';
+function WinCloseHandle(Handle: THandle): Integer;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+{ Whether Path names this install's tinymon.exe. }
+function IsOurExe(const Path: String): Boolean;
+begin
+  Result := CompareText(Path, ExpandConstant('{app}\tinymon.exe')) = 0;
+end;
+
+{ The path of the exe whose process owns window Wnd, or '' if Windows does not
+  tell. }
+function ExeOfWindow(Wnd: HWND): String;
+var
+  Pid, Size: DWORD;
+  Process: THandle;
+  Name: String;
+begin
+  Result := '';
+  Pid := 0;
+  WinGetWindowThreadProcessId(Wnd, Pid);
+  Process := WinOpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, Pid);
+  if Process = 0 then
+    Exit;
+  Size := 1024;
+  SetLength(Name, Size);
+  if WinQueryFullProcessImageName(Process, 0, Name, Size) <> 0 then
+    Result := Copy(Name, 1, Size);
+  WinCloseHandle(Process);
+end;
+
+{ If this install's tinymon.exe runs, ask it to exit the way its menu's Exit
+  does, and wait up to ten seconds for its process to end. True when it ran
+  and has ended. A TinyMon run from another folder is left alone. So is one
+  that runs as administrator, which takes no messages from Setup; if it is
+  this install's, Windows then reports tinymon.exe in use. }
 function CloseTinyMon: Boolean;
 var
   Wnd: HWND;
+  Exe: String;
   I: Integer;
 begin
   Result := False;
   if not CheckForMutexes(InstanceMutex) then
     Exit;
   Wnd := FindWindowByClassName('TinyMonWindow');
-  if (Wnd = 0) or not PostMessage(Wnd, WM_COMMAND, ID_EXIT, 0) then
+  if Wnd = 0 then
+    Exit;
+  Exe := ExeOfWindow(Wnd);
+  if not IsOurExe(Exe) then begin
+    Log('TinyMon runs from another folder, left running: ' + Exe);
+    Exit;
+  end;
+  Log('Closing TinyMon: ' + Exe);
+  if not PostMessage(Wnd, WM_COMMAND, ID_EXIT, 0) then
     Exit;
   for I := 1 to 100 do begin
     Sleep(100);
@@ -130,6 +178,25 @@ begin
       Exit;
     end;
   end;
+end;
+
+{ What starts TinyMon at the end. A Setup that runs as administrator would
+  hand its rights to TinyMon; Explorer starts it with the user's normal rights
+  instead. }
+function LaunchFile(Param: String): String;
+begin
+  if IsAdmin then
+    Result := ExpandConstant('{win}\explorer.exe')
+  else
+    Result := ExpandConstant('{app}\tinymon.exe');
+end;
+
+function LaunchParams(Param: String): String;
+begin
+  if IsAdmin then
+    Result := '"' + ExpandConstant('{app}\tinymon.exe') + '"'
+  else
+    Result := '';
 end;
 
 function InitializeSetup: Boolean;
@@ -157,15 +224,41 @@ begin
   Result := WizardSilent and ClosedTinyMon;
 end;
 
-{ The Run value as the widget's menu writes it (src/startup.rs): the quoted
-  path, with Task Manager's disabled flag for it cleared. }
+{ Whether the Run value starts this install's tinymon.exe: the path inside a
+  leading pair of double quotes, or else the whole value, as launches in
+  src/startup.rs reads it. }
+function RunValueIsOurs: Boolean;
+var
+  Value: String;
+  Quote: Integer;
+begin
+  Result := False;
+  if not RegQueryStringValue(HKCU, RunKey, 'TinyMon', Value) then
+    Exit;
+  Value := Trim(Value);
+  if Copy(Value, 1, 1) = '"' then begin
+    Delete(Value, 1, 1);
+    Quote := Pos('"', Value);
+    if Quote > 0 then
+      Value := Copy(Value, 1, Quote - 1);
+  end;
+  Result := IsOurExe(Value);
+end;
+
+{ On: the Run value as the widget's menu writes it (src/startup.rs), the
+  quoted path, with Task Manager's disabled flag for it cleared. Off: only an
+  entry that starts this install's exe goes; one that starts a copy elsewhere
+  belongs to that copy. }
 procedure SetStartAtSignIn(Enable: Boolean);
 begin
-  if Enable then
-    RegWriteStringValue(HKCU, RunKey, 'TinyMon', '"' + ExpandConstant('{app}\tinymon.exe') + '"')
-  else
+  if Enable then begin
+    RegWriteStringValue(HKCU, RunKey, 'TinyMon', '"' + ExpandConstant('{app}\tinymon.exe') + '"');
+    RegDeleteValue(HKCU, ApprovedKey, 'TinyMon');
+  end else if RunValueIsOurs then begin
     RegDeleteValue(HKCU, RunKey, 'TinyMon');
-  RegDeleteValue(HKCU, ApprovedKey, 'TinyMon');
+    RegDeleteValue(HKCU, ApprovedKey, 'TinyMon');
+  end else
+    Log('No sign-in entry of this install to remove');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -196,8 +289,9 @@ begin
   RemoveDir(Dir);
 end;
 
-{ The settings stay unless the user says Yes, or a silent uninstall passes
-  /DELETESETTINGS. The sign-in entry always goes. }
+{ The settings go when the command line has /DELETESETTINGS or the user says
+  Yes; a silent uninstall asks nothing and keeps them otherwise. The sign-in
+  entry of this install always goes. }
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   case CurUninstallStep of
@@ -206,9 +300,11 @@ begin
         CloseTinyMon;
         if HasSwitch('/DELETESETTINGS') then
           DeleteSettings := True
+        else if UninstallSilent then
+          DeleteSettings := False
         else
-          DeleteSettings := SuppressibleMsgBox(CustomMessage('DeleteSettingsQuestion'),
-            mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES;
+          DeleteSettings := MsgBox(CustomMessage('DeleteSettingsQuestion'),
+            mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
       end;
     usPostUninstall:
       begin

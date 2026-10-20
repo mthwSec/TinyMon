@@ -31,24 +31,25 @@ antivirus programs flag it too; see
 [Antivirus note](#antivirus-note-false-positives). To check a download, see
 [Verifying a download](#verifying-a-download).
 
-**Updating.** Run the newer setup. It closes a running TinyMon the way the
-menu's **Exit** does, which saves the settings, replaces the files and starts
-TinyMon again. It never touches `tinymon.cfg`, so the settings stay, and it
-leaves the Start with Windows entry as it is (the menu's
+**Updating.** Run the newer setup. If the installed TinyMon runs, the setup
+closes it the way the menu's **Exit** does, which saves the settings, replaces
+the files and starts TinyMon again. It never touches `tinymon.cfg`, so the
+settings stay, and it leaves the Start with Windows entry as it is (the menu's
 **Start with Windows** turns it on or off).
 
 **Uninstalling.** In Windows Settings, **Apps**, choose TinyMon, then
-**Uninstall**. The uninstaller closes TinyMon, removes the Start with Windows
-entry and asks whether to delete the settings too. By default it keeps them,
-so a later install starts where you left off. To remove the portable version,
-turn off **Start with Windows** in its menu, choose **Exit** and delete its
-folder.
+**Uninstall**. The uninstaller closes TinyMon, removes its Start with Windows
+entry and asks whether to delete the settings too. By default it keeps them, so
+a later install starts where you left off. The setup and the uninstaller leave
+a TinyMon run from another folder, and its Start with Windows entry, alone. To
+remove the portable version, turn off **Start with Windows** in its menu,
+choose **Exit** and delete its folder.
 
 **Unattended.** `TinyMon-<version>-setup.exe /VERYSILENT` installs with the
 default options (`/MERGETASKS="!startup"` leaves out the sign-in entry) and
-starts TinyMon again only if it closed it. `unins000.exe /VERYSILENT`, in the
-install folder, uninstalls and keeps the settings; add `/DELETESETTINGS` to
-delete them.
+starts TinyMon again only if it closed it. `unins000.exe /VERYSILENT` (or
+`/SILENT`), in the install folder, uninstalls without a question and keeps the
+settings; add `/DELETESETTINGS` to delete them.
 
 **Requirements.** Windows 10 version 1703 or later, or Windows 11, 64-bit. The
 DPI functions TinyMon uses are bound at load time, so an older Windows refuses
@@ -408,8 +409,8 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run    TinyMon = "<full path of t
   unquoted, Windows could start another program instead. One click rewrites it
   in quotes.
 - The setup's **Start TinyMon when I sign in** writes the same entry for the
-  installed exe, and the uninstaller deletes it. An upgrade leaves it as it
-  is.
+  installed exe, and the uninstaller deletes it if it still starts that exe.
+  An upgrade leaves it as it is.
 
 ## FPS: why it is not included
 
