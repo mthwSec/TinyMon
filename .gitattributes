@@ -1,2 +1,4 @@
 * text=auto eol=lf
 *.ico binary
+# The user guide opens in Notepad, which before Windows 10 1809 needs CRLF.
+installer/README.txt text eol=crlf
