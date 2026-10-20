@@ -1,6 +1,6 @@
 # Builds a release. On a v* tag the exe is built twice, on two runners from
-# two checkout paths, and released only when both builds have the same bytes.
-# Run by hand (workflow_dispatch), it is a dry run: it builds, checks and
+# two checkout paths, and released only when both builds have the same bytes;
+# the setup and the zip are made from that exe. Run by hand (workflow_dispatch), it is a dry run: it builds, checks and
 # packages, keeps the result as a workflow artifact and publishes nothing;
 # only the release job, which runs for a tag alone, can write to the repo.
 name: Release
@@ -92,8 +92,28 @@ jobs:
           "build b: $b"
           if ($a -ne $b) { throw 'the two builds differ: the exe is not reproducible, nothing is released' }
 
-      # The zip holds the exe, the README and the licenses; every entry has the
-      # commit time and the entries a fixed order. SHA256SUMS.txt covers the
+      # The setup (installer/tinymon.iss), built with Inno Setup 7.1.0 from its
+      # GitHub release: checked against the pinned SHA-256, then installed in
+      # portable mode, which writes no uninstaller and no registry entries.
+      - name: Build the setup
+        env:
+          INNO_URL: https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe
+          INNO_SHA256: 0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f
+        run: |
+          $inno = Join-Path $env:RUNNER_TEMP 'innosetup.exe'
+          curl.exe -sSfL -o $inno $env:INNO_URL
+          if ($LASTEXITCODE -ne 0) { throw 'downloading Inno Setup failed' }
+          $hash = (Get-FileHash $inno -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:INNO_SHA256) { throw "Inno Setup has SHA-256 $hash, not the pinned one" }
+          $dir = Join-Path $env:RUNNER_TEMP 'inno'
+          $p = Start-Process $inno -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', '/PORTABLE=1', '/NOICONS', "/DIR=`"$dir`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installing Inno Setup failed with exit code $($p.ExitCode)" }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          & "$dir\ISCC.exe" /Q "/DSourceExe=$PWD\built\build-a\tinymon.exe" "/O$PWD\dist" installer\tinymon.iss
+          if ($LASTEXITCODE -ne 0) { throw 'building the setup failed' }
+
+      # The zip holds the exe, the user guide and the licenses; every entry has
+      # the commit time and the entries a fixed order. SHA256SUMS.txt covers the
       # release assets; BUILDINFO.txt holds the exe's own SHA-256 and the tools.
       - name: Package
         run: |
@@ -104,7 +124,7 @@ jobs:
           Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
           $zip = [IO.Compression.ZipFile]::Open("$PWD/dist/$name.zip", 'Create')
           try {
-            foreach ($f in @('built/build-a/tinymon.exe', 'README.md', 'LICENSE-MIT', 'LICENSE-APACHE')) {
+            foreach ($f in @('built/build-a/tinymon.exe', 'installer/README.txt', 'LICENSE-MIT', 'LICENSE-APACHE')) {
               $e = $zip.CreateEntry("$name/$(Split-Path -Leaf $f)", 'Optimal')
               $e.LastWriteTime = $t
               $out = $e.Open()
@@ -113,7 +133,7 @@ jobs:
             }
           } finally { $zip.Dispose() }
           Copy-Item built/build-a/BUILDINFO.txt dist/BUILDINFO.txt
-          $sums = foreach ($f in @("dist/$name.zip", 'dist/BUILDINFO.txt')) {
+          $sums = foreach ($f in @("dist/TinyMon-$v-setup.exe", "dist/$name.zip", 'dist/BUILDINFO.txt')) {
             '{0}  {1}' -f (Get-FileHash $f -Algorithm SHA256).Hash.ToLower(), (Split-Path -Leaf $f)
           }
           [IO.File]::WriteAllText("$PWD/dist/SHA256SUMS.txt", (($sums -join "`n") + "`n"))
